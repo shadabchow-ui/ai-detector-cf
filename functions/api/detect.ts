@@ -38,9 +38,9 @@ function stddev(nums: number[]): number {
   return Math.sqrt(v)
 }
 
-/* ------------------------------------------------------------------
-   Heuristic signal computation (baseline layer)
------------------------------------------------------------------- */
+/* ============================================================
+   1) HEURISTIC BASELINE SIGNALS
+============================================================ */
 
 function computeSignals(text: string) {
   const words = tokenizeWords(text)
@@ -90,22 +90,13 @@ function computeSignals(text: string) {
   }
 }
 
-function heuristicScore(signals: ReturnType<typeof computeSignals>) {
-  const {
-    length,
-    burstiness,
-    repetition,
-    punctuation_rate,
-    avg_word_len,
-    unique_word_ratio,
-  } = signals
-
-  const lowBurst = clamp01(1 - burstiness)
-  const rep = clamp01(repetition / 0.22)
-  const lowUnique = clamp01((0.62 - unique_word_ratio) / 0.25)
-  const punctMid = 1 - clamp01(Math.abs(punctuation_rate - 0.03) / 0.03)
-  const wordLenMid = 1 - clamp01(Math.abs(avg_word_len - 4.7) / 2.0)
-  const lengthFactor = clamp01((length - 40) / 260)
+function heuristicScore(s: ReturnType<typeof computeSignals>) {
+  const lowBurst = clamp01(1 - s.burstiness)
+  const rep = clamp01(s.repetition / 0.22)
+  const lowUnique = clamp01((0.62 - s.unique_word_ratio) / 0.25)
+  const punctMid = 1 - clamp01(Math.abs(s.punctuation_rate - 0.03) / 0.03)
+  const wordLenMid = 1 - clamp01(Math.abs(s.avg_word_len - 4.7) / 2.0)
+  const lengthFactor = clamp01((s.length - 40) / 260)
 
   const raw =
     0.34 * lowBurst +
@@ -114,55 +105,79 @@ function heuristicScore(signals: ReturnType<typeof computeSignals>) {
     0.10 * punctMid +
     0.10 * wordLenMid
 
-  const ai_probability = clamp01(raw * (0.55 + 0.45 * lengthFactor))
-
-  const notes: string[] = []
-  if (length < 40)
-    notes.push('Text is short; detector confidence is reduced.')
-  if (lowBurst > 0.75)
-    notes.push('Low sentence-length variance (low burstiness).')
-  if (repetition > 0.18)
-    notes.push('Elevated repetition detected.')
-  if (unique_word_ratio < 0.5)
-    notes.push('Lower lexical diversity observed.')
-
-  return { ai_probability, notes }
+  return clamp01(raw * (0.55 + 0.45 * lengthFactor))
 }
 
-/* ------------------------------------------------------------------
-   ZipPy-style entropy layer (compression ratio)
------------------------------------------------------------------- */
+/* ============================================================
+   2) ZIPPY-STYLE ENTROPY (COMPRESSION)
+============================================================ */
 
 async function compressionRatio(text: string): Promise<number> {
-  const encoder = new TextEncoder()
-  const data = encoder.encode(text)
-
+  const data = new TextEncoder().encode(text)
   const cs = new CompressionStream('gzip')
   const writer = cs.writable.getWriter()
   writer.write(data)
   writer.close()
-
   const compressed = await new Response(cs.readable).arrayBuffer()
   return compressed.byteLength / data.byteLength
 }
 
 function zipPyScore(ratio: number) {
-  // Expected empirical range
   const min = 0.28
   const max = 0.68
+  return clamp01(1 - (ratio - min) / (max - min))
+}
 
-  const normalized =
-    1 - Math.max(0, Math.min(1, (ratio - min) / (max - min)))
+/* ============================================================
+   3) DETECTGPT-STYLE PERTURBATION STABILITY
+============================================================ */
+
+/**
+ * Create light semantic-preserving perturbations
+ * AI text is unusually stable under these changes
+ */
+function perturbText(text: string, seed: number): string {
+  const words = tokenizeWords(text)
+  if (words.length < 12) return text
+
+  const rng = (n: number) =>
+    Math.abs(Math.sin(seed++ * 9973)) % 1 * n
+
+  const out = [...words]
+
+  // swap two adjacent words
+  const i = Math.floor(rng(out.length - 1))
+  ;[out[i], out[i + 1]] = [out[i + 1], out[i]]
+
+  // drop a low-information word
+  if (out.length > 20) {
+    out.splice(Math.floor(rng(out.length)), 1)
+  }
+
+  return out.join(' ')
+}
+
+function detectGPTScore(text: string, baseScore: number) {
+  const samples = 5
+  const deltas: number[] = []
+
+  for (let i = 0; i < samples; i++) {
+    const perturbed = perturbText(text, i + 1)
+    const sig = computeSignals(perturbed)
+    const score = heuristicScore(sig)
+    deltas.push(Math.abs(score - baseScore))
+  }
+
+  const stability = 1 - clamp01(deltas.reduce((a, b) => a + b, 0) / samples / 0.15)
 
   return {
-    compression_ratio: ratio,
-    zippy_score: normalized,
+    perturbation_stability: stability, // higher = more AI-like
   }
 }
 
-/* ------------------------------------------------------------------
-   HTTP handlers
------------------------------------------------------------------- */
+/* ============================================================
+   HTTP HANDLERS
+============================================================ */
 
 export const onRequestOptions: PagesFunction<Env> = async () => {
   return json({ ok: true })
@@ -170,7 +185,6 @@ export const onRequestOptions: PagesFunction<Env> = async () => {
 
 export const onRequestPost: PagesFunction<Env> = async (ctx) => {
   let body: DetectRequest
-
   try {
     body = await ctx.request.json()
   } catch {
@@ -181,18 +195,22 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) => {
   if (!text) return json({ error: 'Missing "text"' }, 400)
 
   const signals = computeSignals(text)
-  const base = heuristicScore(signals)
+  const baseScore = heuristicScore(signals)
 
-  let zippy = { compression_ratio: 0, zippy_score: 0 }
+  let zippy = 0
   if (signals.length >= 60) {
     const ratio = await compressionRatio(text)
     zippy = zipPyScore(ratio)
   }
 
-  // Ensemble score
+  const detectgpt = detectGPTScore(text, baseScore)
+
+  /* ================= ENSEMBLE ================= */
+
   const finalScore =
-    0.65 * base.ai_probability +
-    0.35 * zippy.zippy_score
+    0.40 * baseScore +
+    0.30 * zippy +
+    0.30 * detectgpt.perturbation_stability
 
   const confidence =
     finalScore >= 0.8 ? 'high' :
@@ -204,13 +222,14 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) => {
     confidence,
     signals: {
       ...signals,
-      compression_ratio: zippy.compression_ratio,
-      zippy_score: zippy.zippy_score,
+      zippy_score: zippy,
+      detectgpt_stability: detectgpt.perturbation_stability,
     },
     notes: [
-      ...base.notes,
+      'Heuristic statistical signals applied.',
       'ZipPy-style compression entropy applied.',
-      'Lower compression ratios often correlate with AI-generated text.',
+      'DetectGPT-style perturbation stability applied.',
+      'Higher stability under perturbation correlates with AI-generated text.',
     ],
   })
 }
