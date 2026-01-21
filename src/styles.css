@@ -1,6 +1,6 @@
 :root{
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
-  --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+  --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
 
   --radius:16px;
   --shadow: 0 16px 50px rgba(0,0,0,.35);
@@ -24,6 +24,9 @@
 }
 
 :root[data-theme="light"]{
+  color-scheme: light;
+  --shadow: 0 12px 30px rgba(15,23,42,.08);
+  --shadow2: 0 10px 24px rgba(15,23,42,.10);
   --bg:#f6f8fc;
   --panel:#ffffff;
   --card:#ffffff;
@@ -50,6 +53,10 @@ body{
     radial-gradient(900px 500px at 85% 10%, color-mix(in srgb, var(--bad) 10%, transparent), transparent 55%),
     radial-gradient(700px 500px at 70% 120%, color-mix(in srgb, var(--good) 8%, transparent), transparent 55%),
     var(--bg);
+}
+
+html[data-theme="light"] body{
+  background: linear-gradient(180deg, #ffffff 0%, var(--bg) 70%);
 }
 
 code{
@@ -506,3 +513,29 @@ code{
 }
 .dropTitle{font-weight: 950; font-size: 18px}
 .dropSub{color: var(--muted); margin-top: 6px}
+
+/* Light theme polish (more GPTZero-like) */
+html[data-theme="light"] .topbar{
+  background: rgba(255,255,255,.78);
+  border-bottom: 1px solid rgba(15,23,42,.08);
+}
+html[data-theme="light"] .card,
+html[data-theme="light"] .panel{
+  border-color: rgba(15,23,42,.10);
+  box-shadow: var(--shadow);
+}
+html[data-theme="light"] .textarea{
+  background: #ffffff;
+  border-color: rgba(15,23,42,.14);
+}
+html[data-theme="light"] .btn{
+  border-color: rgba(15,23,42,.14);
+}
+html[data-theme="light"] .muted{ color: rgba(15,23,42,.70); }
+
+/* Improve keyboard focus */
+:where(button, a, input, textarea, select):focus-visible{
+  outline: 3px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
