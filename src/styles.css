@@ -1,706 +1,508 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+:root{
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
 
-type ApiDetectResponse = {
-  ok: boolean
-  score: number // 0..1 (higher => more likely AI)
-  model?: string
-  details?: {
-    entropy?: number
-    burstiness?: number
-    tokenCount?: number
-    sentenceCount?: number
-  }
-  notes?: string[]
-  error?: string
+  --radius:16px;
+  --shadow: 0 16px 50px rgba(0,0,0,.35);
+  --shadow2: 0 10px 30px rgba(0,0,0,.22);
 }
 
-type ScanMode = 'ai' | 'readability' | 'claims' | 'repetition' | 'custom'
+:root[data-theme="dark"]{
+  --bg:#0b1220;
+  --panel:#0f1a2e;
+  --card:#111d33;
+  --border:rgba(255,255,255,.08);
+  --text:rgba(255,255,255,.92);
+  --muted:rgba(255,255,255,.62);
+  --muted2:rgba(255,255,255,.45);
 
-type HistoryItem = {
-  id: string
-  createdAt: number
-  mode: ScanMode
-  text: string
-  score: number
-  label: 'good' | 'mid' | 'bad'
-  snippet: string
-  meta: Record<string, string>
+  --primary:#4f7cff;
+  --primary2:#2f5bff;
+  --good:#46d38a;
+  --mid:#f2c94c;
+  --bad:#ff5a7a;
 }
 
-function clamp(n: number, min = 0, max = 1) {
-  return Math.max(min, Math.min(max, n))
+:root[data-theme="light"]{
+  --bg:#f6f8fc;
+  --panel:#ffffff;
+  --card:#ffffff;
+  --border:rgba(15,23,42,.10);
+  --text:rgba(15,23,42,.92);
+  --muted:rgba(15,23,42,.60);
+  --muted2:rgba(15,23,42,.45);
+
+  --primary:#2f5bff;
+  --primary2:#1f4cff;
+  --good:#12b76a;
+  --mid:#f2c94c;
+  --bad:#ef476f;
 }
 
-function pct(n01: number) {
-  return Math.round(clamp(n01) * 100)
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:var(--sans);
+  color:var(--text);
+  background:
+    radial-gradient(1200px 700px at 20% -10%, color-mix(in srgb, var(--primary) 22%, transparent), transparent 60%),
+    radial-gradient(900px 500px at 85% 10%, color-mix(in srgb, var(--bad) 10%, transparent), transparent 55%),
+    radial-gradient(700px 500px at 70% 120%, color-mix(in srgb, var(--good) 8%, transparent), transparent 55%),
+    var(--bg);
 }
 
-function labelForScore(score01: number): 'good' | 'mid' | 'bad' {
-  const s = clamp(score01)
-  if (s < 0.35) return 'good'
-  if (s < 0.65) return 'mid'
-  return 'bad'
+code{
+  font-family:var(--mono);
+  font-size:.92em;
 }
 
-function shortId() {
-  return Math.random().toString(16).slice(2, 10)
+.app{min-height:100%; display:flex; flex-direction:column}
+.fileInput{display:none}
+
+.topbar{
+  position:sticky; top:0; z-index:30;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:18px 22px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
 }
 
-function wordCount(text: string) {
-  const t = text.trim()
-  if (!t) return 0
-  return t.split(/\s+/).filter(Boolean).length
+.brand{display:flex; align-items:center; gap:12px}
+.logo{
+  width:40px; height:40px; border-radius:12px;
+  display:grid; place-items:center;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 35%, transparent), color-mix(in srgb, var(--primary) 6%, transparent));
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, transparent);
+  box-shadow: var(--shadow2);
+  font-weight:800;
+}
+.brandTitle{font-weight:800; letter-spacing:.2px}
+.brandSub{color:var(--muted); font-size:13px; margin-top:2px}
+
+.topActions{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+
+.btn{
+  appearance:none;
+  border:1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  color: var(--text);
+  padding:10px 14px;
+  border-radius: 12px;
+  cursor:pointer;
+  font-weight:700;
+  transition: transform .08s ease, background .15s ease, border-color .15s ease, filter .15s ease;
+  display:inline-flex; align-items:center; gap:10px;
+}
+.btn:hover{background: color-mix(in srgb, var(--panel) 85%, transparent); border-color: color-mix(in srgb, var(--text) 14%, transparent)}
+.btn:active{transform: translateY(1px)}
+.btn:disabled{opacity:.6; cursor:not-allowed}
+
+.btn.primary{
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 95%, transparent), color-mix(in srgb, var(--primary2) 92%, transparent));
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+  box-shadow: 0 14px 30px color-mix(in srgb, var(--primary) 22%, transparent);
+}
+.btn.primary:hover{filter:brightness(1.05)}
+.btn.ghost{background: color-mix(in srgb, var(--panel) 55%, transparent)}
+.btn.icon{width:44px; justify-content:center; padding:10px 0}
+
+.btn.small{padding:8px 12px; border-radius: 10px; font-size: 13px}
+
+.spinner{
+  width:14px;height:14px;border-radius:50%;
+  border:2px solid color-mix(in srgb, var(--text) 25%, transparent);
+  border-top-color: color-mix(in srgb, var(--text) 85%, transparent);
+  display:inline-block;
+  animation: spin .75s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.layout{
+  width:min(1240px, 94vw);
+  margin: 22px auto 24px;
+  display:grid;
+  grid-template-columns: 1.45fr .75fr;
+  gap:18px;
+}
+@media (max-width: 980px){
+  .layout{grid-template-columns:1fr}
 }
 
-function sentenceSplit(text: string) {
-  return text
-    .replace(/\s+/g, ' ')
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
+.card{
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card) 92%, transparent),
+    color-mix(in srgb, var(--panel) 92%, transparent)
+  );
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
-function fleschReadingEase(text: string) {
-  // rough heuristic (no syllable dictionary)
-  const words = text.trim().split(/\s+/).filter(Boolean)
-  const sentences = sentenceSplit(text)
-  if (!words.length || !sentences.length) return 0
+.cardHeader{
+  padding:16px 16px 10px;
+  display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+}
+.cardTitle{font-weight:900; letter-spacing:.2px}
+.cardHint{color:var(--muted); font-size:13px; margin-top:4px}
 
-  const syllables = words.reduce((acc, w) => acc + estimateSyllables(w), 0)
-  const ASL = words.length / sentences.length
-  const ASW = syllables / words.length
-  // Flesch Reading Ease
-  const score = 206.835 - 1.015 * ASL - 84.6 * ASW
-  return score
+.meta{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end}
+.pill{
+  font-size:12px;
+  color: color-mix(in srgb, var(--text) 75%, transparent);
+  padding:6px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+}
+.pill.subtle{font-family: var(--mono); font-size: 11.5px}
+
+.editorWrap{padding: 0 16px 12px}
+.textarea{
+  width:100%;
+  min-height: 250px;
+  resize: vertical;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
+  color: var(--text);
+  padding: 14px;
+  font-size: 15px;
+  line-height: 1.45;
+  outline:none;
+}
+.textarea:focus{
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
-function estimateSyllables(word: string) {
-  const w = word.toLowerCase().replace(/[^a-z]/g, '')
-  if (!w) return 0
-  // very rough
-  const groups = w.match(/[aeiouy]+/g)
-  let count = groups ? groups.length : 0
-  if (w.endsWith('e')) count = Math.max(1, count - 1)
-  return Math.max(1, count)
+.editorFooter{
+  padding: 12px 16px 16px;
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
+}
+.leftFoot, .rightFoot{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+
+.toggle{
+  display:flex; align-items:center; gap:8px;
+  color: color-mix(in srgb, var(--text) 80%, transparent);
+  font-size: 13px;
+  user-select:none;
+}
+.toggle input{accent-color: var(--primary)}
+
+.select{
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  border:1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+  border-radius: 12px;
+  padding:8px 10px;
+  outline:none;
+}
+.select:focus{
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
-function repetitionScore(text: string) {
-  // flags repeated 3-gram reuse as "more copy/paste-ish"
-  const t = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ')
-  const toks = t.split(/\s+/).filter(Boolean)
-  if (toks.length < 30) return 0
-  const grams = new Map<string, number>()
-  for (let i = 0; i < toks.length - 2; i++) {
-    const g = `${toks[i]} ${toks[i + 1]} ${toks[i + 2]}`
-    grams.set(g, (grams.get(g) ?? 0) + 1)
-  }
-  const values = [...grams.values()]
-  const repeats = values.filter((v) => v >= 3).reduce((a, b) => a + b, 0)
-  const denom = Math.max(1, values.reduce((a, b) => a + b, 0))
-  return clamp(repeats / denom)
+.alert{
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+}
+.alert.bad{
+  border-color: color-mix(in srgb, var(--bad) 35%, transparent);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+.alertTitle{font-weight:900; margin-bottom:6px}
+.alertBody{color: color-mix(in srgb, var(--text) 82%, transparent); font-size:14px}
+
+.badge{
+  font-size:12px;
+  font-weight:900;
+  padding:7px 10px;
+  border-radius: 999px;
+  border:1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  white-space:nowrap;
+}
+.badge.good{border-color: color-mix(in srgb, var(--good) 35%, transparent); background: color-mix(in srgb, var(--good) 10%, transparent)}
+.badge.mid{border-color: color-mix(in srgb, var(--mid) 40%, transparent); background: color-mix(in srgb, var(--mid) 14%, transparent)}
+.badge.bad{border-color: color-mix(in srgb, var(--bad) 35%, transparent); background: color-mix(in srgb, var(--bad) 12%, transparent)}
+.badge.neutral{border-color: color-mix(in srgb, var(--text) 18%, transparent); background: color-mix(in srgb, var(--panel) 55%, transparent)}
+
+.resultsCard{margin-top: 14px}
+
+.resultTop{
+  padding: 6px 16px 16px;
+  display:grid;
+  grid-template-columns: 120px 1fr;
+  gap: 16px;
+  align-items:center;
+}
+@media (max-width: 620px){
+  .resultTop{grid-template-columns:1fr}
 }
 
-function claimsScore(text: string) {
-  // heuristic: numbers, dates, named entities-ish capitalization density
-  const sents = sentenceSplit(text)
-  if (!sents.length) return 0
-  let hits = 0
-  for (const s of sents) {
-    const hasNumber = /\b\d{2,}\b/.test(s) || /\b\d{4}\b/.test(s)
-    const hasPercent = /%/.test(s)
-    const hasCurrency = /[$€£]\s?\d/.test(s)
-    const caps = (s.match(/\b[A-Z][a-z]{2,}\b/g) ?? []).length
-    const hasClaimVerb = /\b(confirmed|reported|said|stated|announced|claims?|according to|evidence)\b/i.test(s)
-    if (hasNumber || hasPercent || hasCurrency || caps >= 3 || hasClaimVerb) hits++
-  }
-  return clamp(hits / sents.length)
+.resultSummary{display:flex; flex-direction:column; gap:12px}
+.resultScoreLabel{color:var(--muted); font-size:12.5px}
+.resultScoreValue{font-size:44px; font-weight:950; letter-spacing:.2px}
+
+.scoreBarWrap{width:100%}
+.scoreBar{
+  width:100%;
+  height: 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  overflow:hidden;
+}
+.scoreFill{
+  height:100%;
+  width:0%;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--good) 95%, transparent), color-mix(in srgb, var(--mid) 95%, transparent), color-mix(in srgb, var(--bad) 95%, transparent));
+}
+.scoreTicks{
+  display:flex; justify-content:space-between;
+  margin-top:8px;
+  color: var(--muted2);
+  font-size: 11px;
 }
 
-async function readFileAsText(file: File): Promise<string> {
-  const name = (file.name || '').toLowerCase()
-  const ext = name.split('.').pop() || ''
+.grid3{
+  padding: 0 16px 14px;
+  display:grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+@media (max-width: 860px){
+  .grid3{grid-template-columns:1fr}
+}
+.metric{
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
+}
+.metric.wide{grid-column: 1 / -1}
+.metricLabel{color: var(--muted); font-size:12.5px}
+.metricValue{font-size: 22px; font-weight: 950; margin-top:6px}
+.metricHint{color: var(--muted2); font-size:12px; margin-top:6px}
 
-  if (ext === 'txt') {
-    return (await file.text()).trim()
-  }
+.notes{
+  border-top: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
+  padding: 14px 16px 16px;
+}
+.notesTitle{font-weight:900; margin-bottom:10px}
+.notes ul{margin:0; padding-left: 18px; color: color-mix(in srgb, var(--text) 82%, transparent); font-size: 14px}
+.notes li{margin: 6px 0}
 
-  if (ext === 'docx') {
-    try {
-      const mammoth = await import('mammoth')
-      const arrayBuffer = await file.arrayBuffer()
-      const result = await (mammoth as any).extractRawText({ arrayBuffer })
-      return (result?.value ?? '').trim()
-    } catch {
-      // Keep the app usable even if DOCX parsing isn't available in a given environment.
-      throw new Error('DOCX parsing failed. Please paste text directly or upload a .txt file.')
-    }
-  }
-
-  throw new Error('Unsupported file type. Please upload a .txt or .docx file.')
+.calRow{
+  padding: 0 16px 16px;
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
 }
 
-export default function App() {
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark')
-  const [mode, setMode] = useState<ScanMode>('ai')
-
-  const [text, setText] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const [score01, setScore01] = useState(0)
-  const [notes, setNotes] = useState<string[]>([])
-  const [meta, setMeta] = useState<Record<string, string>>({})
-  const [highlightedHtml, setHighlightedHtml] = useState<string>('')
-
-  const [history, setHistory] = useState<HistoryItem[]>([])
-  const [dragOver, setDragOver] = useState(false)
-
-  const [calibration, setCalibration] = useState<'balanced' | 'strict' | 'lenient'>('balanced')
-
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
-
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-  }, [theme])
-
-  const wc = useMemo(() => wordCount(text), [text])
-
-  const endpointLabel = useMemo(() => {
-    if (mode === 'ai') return 'POST /api/detect'
-    return 'local heuristic'
-  }, [mode])
-
-  function setSample() {
-    setError(null)
-    setText(
-      `When people talk about “AI detection,” they often assume there’s a single magic signature. In reality, most detectors combine lightweight signals like token predictability, sentence rhythm, and repetition patterns.\n\nA practical way to use a detector is to treat it as a smoke alarm: it can tell you when something looks unusual, but it can’t prove intent. If you care about accuracy, keep your text specific, cite claims, vary sentence structure naturally, and avoid over-polished filler.`
-    )
-  }
-
-  function buildHeatmap(sentences: string[], sScores: number[]) {
-    // Render simple sentence highlighting
-    const parts: string[] = []
-    for (let i = 0; i < sentences.length; i++) {
-      const s = sentences[i]
-      const sc = clamp(sScores[i] ?? 0)
-      const cls = sc < 0.35 ? 'good' : sc < 0.65 ? 'mid' : 'bad'
-      parts.push(`<span class="sent ${cls}">${escapeHtml(s)}</span>`)
-    }
-    return parts.join(' ')
-  }
-
-  function escapeHtml(s: string) {
-    return s
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#039;')
-  }
-
-  async function runAiDetect(input: string) {
-    const res = await fetch('/api/detect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: input })
-    })
-    const data = (await res.json()) as ApiDetectResponse
-    if (!res.ok || !data.ok) {
-      throw new Error(data.error || `Request failed (${res.status})`)
-    }
-    return data
-  }
-
-  function applyCalibration(raw: number) {
-    // small bias, not a fake “accuracy”
-    if (calibration === 'strict') return clamp(raw + 0.08)
-    if (calibration === 'lenient') return clamp(raw - 0.08)
-    return clamp(raw)
-  }
-
-  async function analyze() {
-    setBusy(true)
-    setError(null)
-    setNotes([])
-    setMeta({})
-    setHighlightedHtml('')
-
-    try {
-      const input = text.trim()
-      if (wordCount(input) < 1) {
-        throw new Error('Paste some text first.')
-      }
-
-      if (mode === 'ai') {
-        const data = await runAiDetect(input)
-        const calibrated = applyCalibration(data.score)
-        setScore01(calibrated)
-        setNotes(data.notes ?? [])
-
-        const d = data.details ?? {}
-        const m: Record<string, string> = {}
-        if (typeof d.entropy === 'number') m['entropy'] = d.entropy.toFixed(3)
-        if (typeof d.burstiness === 'number') m['burstiness'] = d.burstiness.toFixed(3)
-        if (typeof d.tokenCount === 'number') m['tokens'] = String(d.tokenCount)
-        if (typeof d.sentenceCount === 'number') m['sentences'] = String(d.sentenceCount)
-        if (data.model) m['model'] = data.model
-        setMeta(m)
-
-        // Basic per-sentence pseudo heatmap (fallback: reuse overall)
-        const sents = sentenceSplit(input)
-        const local = sents.map((s) => clamp(repetitionScore(s) * 0.25 + claimsScore(s) * 0.15 + calibrated * 0.6))
-        setHighlightedHtml(buildHeatmap(sents, local))
-      } else if (mode === 'readability') {
-        const fr = fleschReadingEase(input)
-        // map: harder text => higher score (more “risky”)
-        const mapped = clamp(1 - clamp(fr / 100))
-        setScore01(mapped)
-        setMeta({
-          'flesch': fr.toFixed(1),
-          'sentences': String(sentenceSplit(input).length),
-          'words': String(wordCount(input))
-        })
-        const tips: string[] = []
-        if (fr < 50) tips.push('Readability looks dense. Try shorter sentences and simpler words.')
-        if (fr >= 50 && fr < 70) tips.push('Readability is okay. Tighten long sentences for clarity.')
-        if (fr >= 70) tips.push('Readability looks easy to follow.')
-        setNotes(tips)
-        const sents = sentenceSplit(input)
-        const sScores = sents.map((s) => clamp(1 - clamp(fleschReadingEase(s) / 100)))
-        setHighlightedHtml(buildHeatmap(sents, sScores))
-      } else if (mode === 'claims') {
-        const cs = claimsScore(input)
-        setScore01(cs)
-        setMeta({
-          'claim-density': pct(cs) + '%',
-          'sentences': String(sentenceSplit(input).length)
-        })
-        setNotes([
-          cs > 0.6
-            ? 'High claim density. If this is informational, consider adding sources or grounding details.'
-            : 'Claim density looks moderate.'
-        ])
-        const sents = sentenceSplit(input)
-        const sScores = sents.map((s) => clamp(claimsScore(s)))
-        setHighlightedHtml(buildHeatmap(sents, sScores))
-      } else if (mode === 'repetition') {
-        const rs = repetitionScore(input)
-        setScore01(rs)
-        setMeta({
-          '3-gram reuse': pct(rs) + '%',
-          'words': String(wordCount(input))
-        })
-        setNotes([
-          rs > 0.45
-            ? 'Lots of repeated phrasing. That can look templated. Reduce boilerplate and vary sentence starts.'
-            : 'Repetition looks normal.'
-        ])
-        const sents = sentenceSplit(input)
-        const sScores = sents.map((s) => repetitionScore(s))
-        setHighlightedHtml(buildHeatmap(sents, sScores))
-      } else if (mode === 'custom') {
-        // simple weighted blend the user can tune later
-        const rs = repetitionScore(input)
-        const cs = claimsScore(input)
-        const fr = clamp(1 - clamp(fleschReadingEase(input) / 100))
-        const blended = clamp(rs * 0.4 + cs * 0.35 + fr * 0.25)
-        setScore01(blended)
-        setMeta({
-          'repetition': pct(rs) + '%',
-          'claims': pct(cs) + '%',
-          'readability-risk': pct(fr) + '%'
-        })
-        setNotes(['Custom blend (repetition + claims + readability). Use this for quick triage, not proof.'])
-        const sents = sentenceSplit(input)
-        const sScores = sents.map((s) => clamp(repetitionScore(s) * 0.4 + claimsScore(s) * 0.35 + (1 - clamp(fleschReadingEase(s) / 100)) * 0.25))
-        setHighlightedHtml(buildHeatmap(sents, sScores))
-      }
-
-      const s = clamp(score01) // note: this is stale in same tick; we compute below using last branch value
-      const finalScore = mode === 'ai' ? undefined : undefined
-
-      const effectiveScore = (() => {
-        // use current derived state if already set; else recompute quickly for history
-        if (mode === 'ai') return clamp(applyCalibration(score01))
-        if (mode === 'readability') return clamp(1 - clamp(fleschReadingEase(text) / 100))
-        if (mode === 'claims') return clamp(claimsScore(text))
-        if (mode === 'repetition') return clamp(repetitionScore(text))
-        return clamp(repetitionScore(text) * 0.4 + claimsScore(text) * 0.35 + (1 - clamp(fleschReadingEase(text) / 100)) * 0.25)
-      })()
-
-      const item: HistoryItem = {
-        id: shortId(),
-        createdAt: Date.now(),
-        mode,
-        text,
-        score: effectiveScore,
-        label: labelForScore(effectiveScore),
-        snippet: text.trim().slice(0, 140) + (text.trim().length > 140 ? '…' : ''),
-        meta: {
-          mode,
-          words: String(wordCount(text)),
-          endpoint: endpointLabel
-        }
-      }
-      setHistory((h) => [item, ...h].slice(0, 25))
-    } catch (e: any) {
-      setError(e?.message || 'Something went wrong.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function openFilePicker() {
-    fileInputRef.current?.click()
-  }
-
-  async function onFileSelected(file: File | null) {
-    if (!file) return
-    setError(null)
-    try {
-      const extracted = await readFileAsText(file)
-      setText(extracted)
-    } catch (e: any) {
-      setError(e?.message || 'Could not read file.')
-    }
-  }
-
-  function onDrop(e: React.DragEvent) {
-    e.preventDefault()
-    setDragOver(false)
-    const f = e.dataTransfer.files?.[0]
-    if (f) void onFileSelected(f)
-  }
-
-  function loadHistory(item: HistoryItem) {
-    setText(item.text)
-    setMode(item.mode)
-    // re-run for consistent UI
-    void analyze()
-  }
-
-  const scorePct = pct(score01)
-  const badge = labelForScore(score01)
-
-  const scanModes: { key: ScanMode; title: string; desc: string; tag?: string }[] = [
-    { key: 'ai', title: 'AI Detector', desc: 'Edge endpoint + lightweight signals.', tag: 'on' },
-    { key: 'readability', title: 'Readability', desc: 'Flesch + sentence heatmap.', tag: 'ok' },
-    { key: 'claims', title: 'Claims Risk', desc: 'Numbers / entities density.', tag: 'ok' },
-    { key: 'repetition', title: 'Repetition', desc: '3-gram reuse patterns.', tag: 'ok' },
-    { key: 'custom', title: 'Custom Blend', desc: 'Weighted triage scan.', tag: 'ok' }
-  ]
-
-  const donutDash = useMemo(() => {
-    const r = 36
-    const c = 2 * Math.PI * r
-    const p = clamp(score01)
-    return {
-      c,
-      dash: `${c * p} ${c * (1 - p)}`
-    }
-  }, [score01])
-
-  return (
-    <div
-      className="app"
-      onDragEnter={(e) => {
-        e.preventDefault()
-        setDragOver(true)
-      }}
-      onDragOver={(e) => e.preventDefault()}
-      onDragLeave={(e) => {
-        e.preventDefault()
-        setDragOver(false)
-      }}
-      onDrop={onDrop}
-    >
-      {dragOver && (
-        <div className="dropOverlay" onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
-          <div className="dropCard card">
-            <div className="dropTitle">Drop a .txt or .docx file</div>
-            <div className="dropSub">We’ll extract text and paste it into the editor.</div>
-          </div>
-        </div>
-      )}
-
-      <input
-        ref={fileInputRef}
-        className="fileInput"
-        type="file"
-        accept=".txt,.docx"
-        onChange={(e) => void onFileSelected(e.target.files?.[0] ?? null)}
-      />
-
-      <header className="topbar">
-        <div className="brand">
-          <div className="logo">AI</div>
-          <div>
-            <div className="brandTitle">AI Text Detector (Cloudflare Pages)</div>
-            <div className="brandSub">Open-source, edge-safe. Probabilistic score (not a guarantee).</div>
-          </div>
-        </div>
-
-        <div className="topActions">
-          <button className="btn ghost" onClick={openFilePicker}>
-            Upload
-          </button>
-
-          <button className="btn ghost" onClick={setSample}>
-            Sample
-          </button>
-
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={theme === 'dark'}
-              onChange={(e) => setTheme(e.target.checked ? 'dark' : 'light')}
-            />
-            Dark
-          </label>
-
-          <select className="select" value={calibration} onChange={(e) => setCalibration(e.target.value as any)}>
-            <option value="balanced">Balanced</option>
-            <option value="strict">Strict</option>
-            <option value="lenient">Lenient</option>
-          </select>
-
-          <button className="btn primary" onClick={() => void analyze()} disabled={busy}>
-            {busy ? <span className="spinner" /> : null}
-            Analyze
-          </button>
-        </div>
-      </header>
-
-      <main className="layout">
-        <section className="card">
-          <div className="cardHeader">
-            <div>
-              <div className="cardTitle">Paste text</div>
-              <div className="cardHint">40+ words recommended for stable signals.</div>
-            </div>
-            <div className="meta">
-              <span className="pill subtle">Endpoint: {endpointLabel}</span>
-              <span className="pill">{wc} words</span>
-            </div>
-          </div>
-
-          <div className="editorWrap">
-            <textarea
-              className="textarea"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Paste text here (40+ words recommended)…"
-            />
-          </div>
-
-          <div className="editorFooter">
-            <div className="leftFoot">
-              <span className={`badge ${badge}`}>
-                Score: {scorePct}%
-              </span>
-              <span className="badge neutral">{mode.toUpperCase()}</span>
-            </div>
-
-            <div className="rightFoot">
-              <button className="btn small" onClick={() => setText('')} disabled={busy || !text.trim()}>
-                Clear
-              </button>
-              <button className="btn small" onClick={openFilePicker} disabled={busy}>
-                Upload
-              </button>
-            </div>
-          </div>
-
-          {error && (
-            <div className="alert bad">
-              <div className="alertTitle">Error</div>
-              <div className="alertBody">{error}</div>
-            </div>
-          )}
-
-          <div className="card resultsCard">
-            <div className="resultTop">
-              <div className="donut" aria-label="Score donut">
-                <svg width="92" height="92" viewBox="0 0 92 92">
-                  <circle className="donutTrack" cx="46" cy="46" r="36" />
-                  <circle
-                    className="donutValue"
-                    cx="46"
-                    cy="46"
-                    r="36"
-                    strokeDasharray={donutDash.dash}
-                  />
-                </svg>
-                <div className="donutCenter">
-                  <div className="donutPct">{scorePct}%</div>
-                  <div className="donutLabel">risk</div>
-                </div>
-              </div>
-
-              <div className="resultSummary">
-                <div>
-                  <div className="resultScoreLabel">Probabilistic signal score</div>
-                  <div className="resultScoreValue">{scorePct}%</div>
-                </div>
-
-                <div className="scoreBarWrap">
-                  <div className="scoreBar">
-                    <div className="scoreFill" style={{ width: `${scorePct}%` }} />
-                  </div>
-                  <div className="scoreTicks">
-                    <span>likely human</span>
-                    <span>mixed</span>
-                    <span>likely ai</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid3">
-              <div className="metric">
-                <div className="metricLabel">Mode</div>
-                <div className="metricValue">{mode}</div>
-                <div className="metricHint">Switch scan types in the sidebar.</div>
-              </div>
-
-              <div className="metric">
-                <div className="metricLabel">Words</div>
-                <div className="metricValue">{wc}</div>
-                <div className="metricHint">More text improves stability.</div>
-              </div>
-
-              <div className="metric">
-                <div className="metricLabel">Calibration</div>
-                <div className="metricValue">{calibration}</div>
-                <div className="metricHint">Small bias only (not accuracy).</div>
-              </div>
-
-              <div className="metric wide">
-                <div className="metricLabel">Signals</div>
-                <div className="metricValue">
-                  {Object.keys(meta).length ? Object.entries(meta).map(([k, v]) => `${k}: ${v}`).join(' • ') : '—'}
-                </div>
-                <div className="metricHint">Some signals only appear in AI mode.</div>
-              </div>
-            </div>
-
-            <div className="notes">
-              <div className="notesTitle">Notes</div>
-              {notes?.length ? (
-                <ul>
-                  {notes.map((n, idx) => (
-                    <li key={idx}>{n}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="smallMuted">Run a scan to see guidance.</div>
-              )}
-            </div>
-          </div>
-
-          <div className="card previewCard">
-            <div className="cardHeader">
-              <div>
-                <div className="cardTitle">Preview heatmap</div>
-                <div className="cardHint">Sentence-level highlighting (heuristic).</div>
-              </div>
-            </div>
-            <div className="previewBody" dangerouslySetInnerHTML={{ __html: highlightedHtml || '<span class="smallMuted">No preview yet.</span>' }} />
-          </div>
-        </section>
-
-        <aside className="card sideCard">
-          <div className="sideHeader">
-            <div className="sideTitle">Scans</div>
-            <div className="sideSub">Pick a scan type, then Analyze.</div>
-          </div>
-
-          <div className="sideTabs">
-            <button
-              className={`tabBtn ${mode === 'ai' ? 'active' : ''}`}
-              onClick={() => setMode('ai')}
-            >
-              Detector <span className="tabPill">API</span>
-            </button>
-            <button
-              className={`tabBtn ${mode !== 'ai' ? 'active' : ''}`}
-              onClick={() => setMode('readability')}
-            >
-              Heuristics <span className="tabPill">Local</span>
-            </button>
-          </div>
-
-          <div className="scanList">
-            {scanModes.map((s) => (
-              <button
-                key={s.key}
-                className={`scanItem ${mode === s.key ? 'active' : ''}`}
-                onClick={() => setMode(s.key)}
-              >
-                <div className="scanIcon">{s.title.slice(0, 1)}</div>
-                <div className="scanText">
-                  <div className="scanName">{s.title}</div>
-                  <div className="scanDesc">{s.desc}</div>
-                </div>
-                <div className={`scanTag ${s.tag === 'ok' ? 'ok' : s.tag === 'off' ? 'off' : ''}`}>
-                  {s.key === 'ai' ? 'on' : 'ok'}
-                </div>
-              </button>
-            ))}
-          </div>
-
-          <div className="historyTools">
-            <button className="btn small" onClick={() => setHistory([])} disabled={!history.length}>
-              Clear history
-            </button>
-          </div>
-
-          <div className="historyList">
-            {!history.length ? (
-              <div className="empty">
-                <div className="emptyTitle">No runs yet</div>
-                <div className="smallMuted">Analyze something and your results will show up here.</div>
-              </div>
-            ) : (
-              history.map((h) => (
-                <button
-                  key={h.id}
-                  className={`historyItem ${h.label}`}
-                  onClick={() => loadHistory(h)}
-                >
-                  <div className="historyTop">
-                    <div className="historyScore">{pct(h.score)}%</div>
-                    <div className="historyMeta">
-                      <span>{new Date(h.createdAt).toLocaleTimeString()}</span>
-                      <span>•</span>
-                      <span>{h.mode}</span>
-                      <span>•</span>
-                      <span>{h.meta.words}w</span>
-                    </div>
-                  </div>
-                  <div className="historySnippet">{h.snippet}</div>
-                  <div className="historyBottom">
-                    <span className="miniPill">{h.meta.endpoint}</span>
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
-
-          <div className="sideFooter">
-            <div className="smallMuted">
-              Tip: if you see a blank page after deploy, open DevTools → Console. A broken import (like
-              <code>mammoth/mammoth.browser</code>) will stop React from rendering.
-            </div>
-          </div>
-        </aside>
-      </main>
-
-      <div className="footer">
-        <div className="smallMuted">
-          This starter uses lightweight statistical signals to stay Edge-compatible. If you want stronger detection, add a second-pass method later.
-        </div>
-      </div>
-    </div>
-  )
+/* Preview heatmap */
+.previewCard{margin-top: 14px}
+.previewBody{
+  padding: 0 16px 16px;
+  line-height: 1.55;
+  font-size: 14.5px;
 }
+.sent{
+  border-radius: 8px;
+  padding: 2px 4px;
+  margin: 1px 2px;
+  display:inline;
+}
+.sent.good{background: color-mix(in srgb, var(--good) 12%, transparent); border: 1px solid color-mix(in srgb, var(--good) 18%, transparent)}
+.sent.mid{background: color-mix(in srgb, var(--mid) 14%, transparent); border: 1px solid color-mix(in srgb, var(--mid) 22%, transparent)}
+.sent.bad{background: color-mix(in srgb, var(--bad) 14%, transparent); border: 1px solid color-mix(in srgb, var(--bad) 22%, transparent)}
+
+/* Sidebar */
+.sideCard{padding-bottom: 10px}
+.sideHeader{padding: 16px}
+.sideTitle{font-weight:950}
+.sideSub{color: var(--muted); font-size:13px; margin-top:6px}
+
+.sideTabs{
+  display:flex;
+  gap:8px;
+  padding: 12px 12px 0;
+}
+.tabBtn{
+  flex:1;
+  border-radius: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  color: var(--text);
+  font-weight: 900;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:10px;
+}
+.tabBtn.active{
+  border-color: color-mix(in srgb, var(--primary) 35%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 18%, transparent), color-mix(in srgb, var(--panel) 70%, transparent));
+}
+.tabPill{
+  font-size: 11px;
+  font-weight: 950;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+}
+
+.scanList{display:flex; flex-direction:column; padding: 0 10px 10px}
+.scanItem{
+  width:100%;
+  display:flex; align-items:center; gap:12px;
+  padding: 12px 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  color: var(--text);
+  cursor:pointer;
+  transition: background .15s ease, border-color .15s ease, transform .08s ease;
+  text-align:left;
+}
+.scanItem:hover{background: color-mix(in srgb, var(--panel) 70%, transparent); border-color: color-mix(in srgb, var(--text) 14%, transparent)}
+.scanItem:active{transform: translateY(1px)}
+.scanItem.active{
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 18%, transparent), color-mix(in srgb, var(--panel) 70%, transparent));
+  border-color: color-mix(in srgb, var(--primary) 28%, transparent);
+}
+
+.scanIcon{
+  width:34px; height:34px;
+  border-radius: 12px;
+  display:grid; place-items:center;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  color: color-mix(in srgb, var(--text) 90%, transparent);
+  font-weight:950;
+}
+.scanText{flex:1}
+.scanName{font-weight:950}
+.scanDesc{color: var(--muted); font-size:12.5px; margin-top:2px}
+.scanTag{
+  font-size: 11px;
+  font-weight: 950;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+}
+.scanTag.ok{border-color: color-mix(in srgb, var(--good) 35%, transparent); background: color-mix(in srgb, var(--good) 10%, transparent)}
+.scanTag.off{border-color: color-mix(in srgb, var(--text) 14%, transparent); background: color-mix(in srgb, var(--panel) 55%, transparent); color: color-mix(in srgb, var(--text) 70%, transparent)}
+
+.historyTools{padding: 0 16px 10px; display:flex; justify-content:flex-end}
+.historyList{padding: 0 12px 12px; display:flex; flex-direction:column; gap:10px}
+.historyItem{
+  width:100%;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  padding: 12px;
+  cursor:pointer;
+  color: var(--text);
+  text-align:left;
+}
+.historyItem:hover{border-color: color-mix(in srgb, var(--text) 14%, transparent); background: color-mix(in srgb, var(--panel) 70%, transparent)}
+.historyItem.good{box-shadow: 0 0 0 1px color-mix(in srgb, var(--good) 10%, transparent) inset}
+.historyItem.mid{box-shadow: 0 0 0 1px color-mix(in srgb, var(--mid) 12%, transparent) inset}
+.historyItem.bad{box-shadow: 0 0 0 1px color-mix(in srgb, var(--bad) 12%, transparent) inset}
+
+.historyTop{display:flex; align-items:baseline; justify-content:space-between; gap:10px}
+.historyScore{font-weight: 950; font-size: 18px}
+.historyMeta{color: var(--muted2); font-size: 12px; display:flex; gap:6px; flex-wrap:wrap}
+.historySnippet{margin-top: 8px; color: color-mix(in srgb, var(--text) 84%, transparent); font-size: 13px; line-height: 1.35}
+.historyBottom{margin-top: 10px; display:flex; gap:8px; flex-wrap:wrap}
+.miniPill{
+  font-size: 11px;
+  font-weight: 900;
+  padding: 5px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  color: color-mix(in srgb, var(--text) 78%, transparent);
+}
+
+.empty{padding: 12px 6px}
+.emptyTitle{font-weight: 950; margin-bottom: 6px}
+
+.bullets{padding: 0 16px 10px}
+.bullet{
+  display:flex; gap:10px; align-items:flex-start;
+  padding: 10px 0;
+  color: color-mix(in srgb, var(--text) 82%, transparent);
+  font-size: 13.5px;
+}
+.dot{
+  width:10px; height:10px; margin-top:4px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--primary) 90%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.sideFooter{padding: 0 16px 14px}
+.smallMuted{color: var(--muted2); font-size: 12.5px; line-height: 1.35}
+
+.footer{
+  width:min(1240px, 94vw);
+  margin: 0 auto 22px;
+  padding: 6px 0 22px;
+  display:flex; justify-content:flex-start;
+}
+
+/* Donut */
+.donut{position:relative; width:92px; height:92px}
+.donut svg{display:block}
+.donutTrack{
+  fill:none;
+  stroke: color-mix(in srgb, var(--text) 10%, transparent);
+  stroke-width: 10;
+}
+.donutValue{
+  fill:none;
+  stroke: linear-gradient(90deg, var(--good), var(--mid), var(--bad));
+  stroke: var(--primary);
+  stroke-width: 10;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 6px 16px color-mix(in srgb, var(--primary) 18%, transparent));
+}
+.donutCenter{
+  position:absolute; inset:0;
+  display:grid; place-items:center;
+  text-align:center;
+  pointer-events:none;
+}
+.donutPct{font-weight: 950; font-size: 18px}
+.donutLabel{color: var(--muted2); font-size: 12px; margin-top:-4px}
+
+/* Drag & drop overlay */
+.dropOverlay{
+  position:fixed; inset:0; z-index:100;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  display:grid; place-items:center;
+  backdrop-filter: blur(6px);
+}
+.dropCard{
+  width:min(520px, 92vw);
+  border-radius: 18px;
+  border: 1px dashed color-mix(in srgb, var(--primary) 45%, transparent);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  padding: 22px;
+  box-shadow: var(--shadow);
+  text-align:center;
+}
+.dropTitle{font-weight: 950; font-size: 18px}
+.dropSub{color: var(--muted); margin-top: 6px}
