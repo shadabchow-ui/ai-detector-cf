@@ -171,9 +171,9 @@ async function readFileAsText(file: File): Promise<string> {
   }
   if (ext === 'docx') {
     // dynamic import to keep bundle smaller
-    const mammoth = await import('mammoth/mammoth.browser')
+    const mammoth = await import('mammoth')
     const arrayBuffer = await file.arrayBuffer()
-    const result = await mammoth.extractRawText({ arrayBuffer })
+    const result = await (mammoth as any).extractRawText({ arrayBuffer })
     return (result.value ?? '').trim()
   }
   throw new Error('Unsupported file type. Use .txt, .md, or .docx')
