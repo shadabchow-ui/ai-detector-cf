@@ -1,13 +1,14 @@
 import React, { useMemo, useRef, useState } from 'react'
 
-type DetectResult = {
+type ScanMode = 'advanced' | 'plagiarism' | 'hallucinations' | 'writing' | 'custom'
+
+type ApiDetectResponse = {
   ok: boolean
-  score: number // 0..1 AI likelihood
+  score?: number // 0..1 (higher => more likely AI)
   model?: string
   details?: {
     entropy?: number
     burstiness?: number
-    gzipRatio?: number
     tokenCount?: number
     sentenceCount?: number
   }
@@ -15,561 +16,444 @@ type DetectResult = {
   error?: string
 }
 
-type ScanMode = 'advanced_ai'
-
-type HistoryItem = {
-  id: string
-  ts: number
-  mode: ScanMode
-  text: string
-  result: DetectResult
+function clamp(n: number, min = 0, max = 1) {
+  return Math.max(min, Math.min(max, n))
 }
 
-const HUMAN_SAMPLE =
-  `I planned to clean my desk this morning, but I ended up sorting old notes instead.
+function pct(n: number) {
+  return `${Math.round(clamp(n) * 100)}%`
+}
+
+function shortCountLabel(text: string) {
+  const words = text.trim().length ? text.trim().split(/\s+/).length : 0
+  const chars = text.length
+  return { words, chars }
+}
+
+function iconSvg(kind: string) {
+  // simple inline icons (no deps)
+  const common = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', xmlns: 'http://www.w3.org/2000/svg' }
+  switch (kind) {
+    case 'home':
+      return (
+        <svg {...common}>
+          <path d="M3 10.5L12 3l9 7.5V21a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10.5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+        </svg>
+      )
+    case 'docs':
+      return (
+        <svg {...common}>
+          <path d="M7 3h7l3 3v15a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="2"/>
+          <path d="M14 3v4h4" stroke="currentColor" strokeWidth="2"/>
+          <path d="M8.5 12h7M8.5 16h7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+        </svg>
+      )
+    case 'review':
+      return (
+        <svg {...common}>
+          <path d="M4 7a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v12l-4-3H6a2 2 0 0 1-2-2V7Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+          <path d="M8 9h6M8 12h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+        </svg>
+      )
+    case 'plus':
+      return (
+        <svg {...common}>
+          <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+        </svg>
+      )
+    case 'help':
+      return (
+        <svg {...common}>
+          <path d="M12 22a10 10 0 1 0-10-10 10 10 0 0 0 10 10Z" stroke="currentColor" strokeWidth="2"/>
+          <path d="M9.5 9a2.5 2.5 0 1 1 4.2 1.8c-.8.7-1.7 1.1-1.7 2.2v.3" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          <path d="M12 17h.01" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/>
+        </svg>
+      )
+    case 'settings':
+      return (
+        <svg {...common}>
+          <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke="currentColor" strokeWidth="2"/>
+          <path d="M19.4 15a7.9 7.9 0 0 0 .1-1 7.9 7.9 0 0 0-.1-1l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-1.7-1l-.4-2.6H9.1l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.4-1-2 3.4L4.6 13a7.9 7.9 0 0 0-.1 1 7.9 7.9 0 0 0 .1 1l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 1.7 1l.4 2.6h5.8l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+        </svg>
+      )
+    default:
+      return null
+  }
+}
+
+export default function App() {
+  const fileRef = useRef<HTMLInputElement | null>(null)
+
+  const [activeSide, setActiveSide] = useState<'home' | 'docs' | 'review'>('docs')
+
+  const [text, setText] = useState<string>('')
+
+  const [autoTrim, setAutoTrim] = useState(true)
+  const [highlightSentences, setHighlightSentences] = useState(true)
+  const [showBreakdown, setShowBreakdown] = useState(true)
+
+  const [mode, setMode] = useState<ScanMode>('advanced')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<ApiDetectResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const counts = useMemo(() => shortCountLabel(text), [text])
+  const endpointLabel = useMemo(() => `POST /api/detect`, [])
+
+  function setSample(which: 'human' | 'ai') {
+    const human =
+      `I planned to clean my desk this morning, but I ended up sorting old notes instead.
 It's not dramatic—just a small reminder that attention drifts. I'm going to set a
 20-minute timer, finish one task, and then decide what's worth keeping.`
 
-const AI_SAMPLE =
-  `In the modern information ecosystem, language patterns can be evaluated using statistical
-features such as distributional predictability, repetition rate, and sentence structure stability.
-When multiple signals converge, the probability of machine-generated text increases.`
+    const ai =
+      `In today’s fast-paced world, productivity is often defined by how efficiently we manage our time.
+By organizing priorities, minimizing distractions, and using structured routines, individuals can
+achieve better outcomes and maintain consistent progress toward their goals.`
 
-function clamp(n: number, a = 0, b = 1) {
-  return Math.max(a, Math.min(b, n))
-}
-
-function nowId() {
-  return Math.random().toString(16).slice(2) + '-' + Date.now().toString(16)
-}
-
-function splitSentences(input: string) {
-  const text = input.replace(/\s+/g, ' ').trim()
-  if (!text) return []
-  // simple sentence split that behaves nicely for UI preview
-  return text
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(Boolean)
-    .slice(0, 12)
-}
-
-function confidenceLabel(p: number) {
-  if (p < 0.33) return 'Low confidence'
-  if (p < 0.66) return 'Medium confidence'
-  return 'High confidence'
-}
-
-function localHeuristic(text: string): DetectResult {
-  const raw = text.trim()
-  const sentences = splitSentences(raw)
-  const words = raw ? raw.split(/\s+/).filter(Boolean) : []
-  const tokenCount = words.length
-
-  // crude lexical diversity
-  const lower = words.map(w => w.toLowerCase().replace(/[^a-z0-9']/g, ''))
-  const uniq = new Set(lower.filter(Boolean))
-  const diversity = words.length ? uniq.size / words.length : 0
-
-  // repetition proxy
-  let repeats = 0
-  const freq = new Map<string, number>()
-  for (const w of lower) {
-    if (!w) continue
-    freq.set(w, (freq.get(w) || 0) + 1)
+    setText(which === 'human' ? human : ai)
+    setResult(null)
+    setError(null)
   }
-  for (const [, c] of freq) {
-    if (c >= 4) repeats += c
+
+  async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    const content = await f.text()
+    setText(content)
+    setResult(null)
+    setError(null)
   }
-  const repetition = words.length ? repeats / words.length : 0
 
-  // sentence length variance proxy (burstiness-ish)
-  const lens = sentences.map(s => s.split(/\s+/).filter(Boolean).length).filter(n => n > 0)
-  const mean = lens.length ? lens.reduce((a, b) => a + b, 0) / lens.length : 0
-  const variance = lens.length ? lens.reduce((a, b) => a + (b - mean) * (b - mean), 0) / lens.length : 0
-
-  // score: lower diversity + higher repetition + very stable sentence length => more AI-ish
-  const s = clamp(
-    0.55 * (1 - diversity) +
-      0.30 * repetition +
-      0.15 * (variance < 18 ? 0.8 : 0.2)
-  )
-
-  return {
-    ok: true,
-    score: s,
-    model: 'local-heuristic',
-    details: {
-      entropy: diversity,
-      burstiness: variance,
-      tokenCount,
-      sentenceCount: sentences.length,
-    },
-    notes: [
-      'Local fallback scoring (no API).',
-      'Use longer samples (80+ words) for better signal.',
-    ],
+  function normalizedText() {
+    let t = text
+    if (autoTrim) t = t.trim()
+    return t
   }
-}
 
-async function apiDetect(text: string): Promise<DetectResult> {
-  // Try the most common payloads without breaking your existing worker.
-  const candidates = [
-    { text },
-    { input: text },
-    { content: text },
-    { text, mode: 'ai' },
-  ]
+  async function runScan() {
+    setError(null)
+    setResult(null)
 
-  let lastErr = ''
-  for (const body of candidates) {
+    const payloadText = normalizedText()
+    if (!payloadText || payloadText.split(/\s+/).filter(Boolean).length < 10) {
+      setError('Paste more text (recommended 40+ words) for a more stable score.')
+      return
+    }
+
+    setLoading(true)
     try {
       const res = await fetch('/api/detect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          text: payloadText,
+          mode,
+          options: {
+            highlightSentences,
+            showBreakdown,
+          },
+        }),
       })
 
-      if (!res.ok) {
-        lastErr = `HTTP ${res.status}`
-        continue
+      const data = (await res.json()) as ApiDetectResponse
+      if (!data.ok) {
+        setError(data.error || 'Scan failed.')
+        setResult(null)
+      } else {
+        setResult(data)
       }
-
-      const data = await res.json()
-
-      // normalize common response shapes
-      const scoreRaw =
-        typeof data?.score === 'number' ? data.score :
-        typeof data?.ai === 'number' ? data.ai :
-        typeof data?.probability === 'number' ? data.probability :
-        typeof data?.result?.score === 'number' ? data.result.score :
-        null
-
-      if (scoreRaw === null) {
-        lastErr = 'No score in response'
-        continue
-      }
-
-      const score = clamp(scoreRaw)
-      const details = data?.details || data?.result?.details || {}
-      const model = data?.model || data?.result?.model || 'api'
-      const notes = data?.notes || data?.result?.notes || []
-
-      return {
-        ok: true,
-        score,
-        model,
-        details: {
-          entropy: typeof details?.entropy === 'number' ? details.entropy : undefined,
-          burstiness: typeof details?.burstiness === 'number' ? details.burstiness : undefined,
-          gzipRatio: typeof details?.gzipRatio === 'number' ? details.gzipRatio : undefined,
-          tokenCount: typeof details?.tokenCount === 'number' ? details.tokenCount : undefined,
-          sentenceCount: typeof details?.sentenceCount === 'number' ? details.sentenceCount : undefined,
-        },
-        notes: Array.isArray(notes) ? notes : [],
-      }
-    } catch (e: any) {
-      lastErr = e?.message || 'Network error'
+    } catch (err: any) {
+      setError(err?.message || 'Network error.')
+    } finally {
+      setLoading(false)
     }
   }
 
-  return { ok: false, score: 0, error: lastErr || 'API failed' }
-}
-
-export default function App() {
-  const [text, setText] = useState('')
-  const [mode] = useState<ScanMode>('advanced_ai')
-  const [activeTab, setActiveTab] = useState<'scan' | 'history'>('scan')
-
-  const [showBreakdown, setShowBreakdown] = useState(true)
-  const [highlightSentences, setHighlightSentences] = useState(true)
-
-  const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState<DetectResult | null>(null)
-  const [history, setHistory] = useState<HistoryItem[]>([])
-
-  const fileRef = useRef<HTMLInputElement | null>(null)
-
-  const words = useMemo(() => {
-    const w = text.trim().split(/\s+/).filter(Boolean)
-    return w.length
-  }, [text])
-
-  const chars = useMemo(() => text.length, [text])
-
-  const sentences = useMemo(() => splitSentences(text), [text])
-
-  const scorePct = useMemo(() => {
-    const s = result?.ok ? result.score : 0
-    return Math.round(clamp(s) * 100)
-  }, [result])
-
-  const confidence = useMemo(() => confidenceLabel((result?.ok ? result.score : 0) ?? 0), [result])
-
-  const onSample = (kind: 'human' | 'ai') => {
-    setText(kind === 'human' ? HUMAN_SAMPLE : AI_SAMPLE)
-    setResult(null)
-  }
-
-  const onUpload = async (file: File) => {
-    const name = file.name.toLowerCase()
-    if (!(name.endsWith('.txt') || name.endsWith('.md'))) {
-      // keep it simple + safe: no docx parsing in-browser here
-      setResult({
-        ok: false,
-        score: 0,
-        error: 'Only .txt or .md upload is supported right now.',
-      })
-      return
-    }
-    const content = await file.text()
-    setText(content)
-    setResult(null)
-  }
-
-  const runScan = async () => {
-    const trimmed = text.trim()
-    if (!trimmed) return
-
-    setLoading(true)
-    setResult(null)
-
-    let r = await apiDetect(trimmed)
-    if (!r.ok) {
-      r = localHeuristic(trimmed)
-      r.notes = [...(r.notes || []), `API error: ${r.error || 'unknown'}`]
-    }
-
-    setResult(r)
-
-    const item: HistoryItem = {
-      id: nowId(),
-      ts: Date.now(),
-      mode,
-      text: trimmed,
-      result: r,
-    }
-    setHistory(prev => [item, ...prev].slice(0, 10))
-
-    setLoading(false)
-    setActiveTab('scan')
-  }
-
-  const pickHistory = (h: HistoryItem) => {
-    setText(h.text)
-    setResult(h.result)
-    setActiveTab('scan')
-  }
-
-  const clearAll = () => {
-    setText('')
-    setResult(null)
-  }
+  const uiScore = result?.score ?? null
+  const confidence =
+    uiScore == null ? null :
+    uiScore >= 0.7 ? 'High confidence' :
+    uiScore >= 0.45 ? 'Medium confidence' :
+    'Low confidence'
 
   return (
-    <div className="container">
-      <div className="topbar">
-        <div className="brand">
-          <div className="logo" />
-          <div className="title">
-            <strong>AI Text Detector</strong>
-            <span>GPTZero-style UI · Cloudflare Pages · Multi-signal scoring</span>
-          </div>
-        </div>
+    <div className="appShell">
+      {/* LEFT SIDEBAR (GPTZero-like) */}
+      <aside className="sidebar" aria-label="UpCube Detect navigation">
+        <div className="brandDot" title="UpCube Detect">U</div>
 
-        <div className="pills">
-          <button className="pill ghost" onClick={() => onSample('human')}>Human sample</button>
-          <button className="pill ghost" onClick={() => onSample('ai')}>AI sample</button>
-
+        <nav className="sideNav">
           <button
-            className="pill ghost"
-            onClick={() => fileRef.current?.click()}
+            className={`sideItem ${activeSide === 'home' ? 'sideItemActive' : ''}`}
+            onClick={() => setActiveSide('home')}
+            title="Home"
+            aria-label="Home"
           >
-            Upload
+            {iconSvg('home')}
           </button>
 
           <button
-            className="pill primary"
-            disabled={loading || !text.trim()}
-            onClick={runScan}
-            title={!text.trim() ? 'Paste text first' : 'Run scan'}
+            className={`sideItem ${activeSide === 'docs' ? 'sideItemActive' : ''}`}
+            onClick={() => setActiveSide('docs')}
+            title="Documents"
+            aria-label="Documents"
           >
-            {loading ? 'Scanning…' : 'Scan'}
+            {iconSvg('docs')}
           </button>
 
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".txt,.md"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              if (f) onUpload(f)
-              e.currentTarget.value = ''
-            }}
-          />
+          <button
+            className={`sideItem ${activeSide === 'review' ? 'sideItemActive' : ''}`}
+            onClick={() => setActiveSide('review')}
+            title="AI Review"
+            aria-label="AI Review"
+          >
+            {iconSvg('review')}
+          </button>
+
+          <button
+            className="sideItem"
+            onClick={() => alert('Coming soon')}
+            title="New"
+            aria-label="New"
+          >
+            {iconSvg('plus')}
+          </button>
+        </nav>
+
+        <div className="sideSpacer" />
+
+        <div className="sideFooter">
+          <button className="sideItem" title="Help" aria-label="Help" onClick={() => alert('Help coming soon')}>
+            {iconSvg('help')}
+          </button>
+          <button className="sideItem" title="Settings" aria-label="Settings" onClick={() => alert('Settings coming soon')}>
+            {iconSvg('settings')}
+          </button>
         </div>
-      </div>
+      </aside>
 
-      <div className="layout">
-        {/* LEFT */}
-        <div className="card">
-          <div className="cardInner">
-            <div className="cardHeader">
-              <div className="hgroup">
-                <h2>Paste text</h2>
-                <p>Or drag-drop a file anywhere · Recommended: 40+ words</p>
-              </div>
-
-              <div className="chips">
-                <span className="chip">{words} words</span>
-                <span className="chip">{chars} chars</span>
-                <span className="chip">POST /api/detect</span>
+      {/* MAIN */}
+      <main className="main">
+        <div className="wrap">
+          {/* TOP BAR (like GPTZero doc header row) */}
+          <div className="topBar">
+            <div className="docTitle">
+              <div>
+                <h1>UpCube Detect <span>Untitled Document</span></h1>
               </div>
             </div>
 
-            <div className="editorWrap">
-              <textarea
-                className="textarea"
-                placeholder="Paste text here…"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
+            <div className="actionRow">
+              <button className="btn btnGhost" onClick={() => setSample('human')}>Human sample</button>
+              <button className="btn btnGhost" onClick={() => setSample('ai')}>AI sample</button>
+
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".txt,.md,.docx"
+                style={{ display: 'none' }}
+                onChange={onPickFile}
               />
+              <button className="btn" onClick={() => fileRef.current?.click()}>
+                Upload
+              </button>
+
+              <button className="btn btnPrimary" onClick={runScan} disabled={loading}>
+                {loading ? 'Scanning…' : 'Scan'}
+              </button>
             </div>
-
-            <div className="editorFooter">
-              <div className="toggles">
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={showBreakdown}
-                    onChange={(e) => setShowBreakdown(e.target.checked)}
-                  />
-                  Show breakdown
-                </label>
-
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={highlightSentences}
-                    onChange={(e) => setHighlightSentences(e.target.checked)}
-                  />
-                  Highlight sentences
-                </label>
-              </div>
-
-              <div className="smallRow">
-                <button className="pill ghost" onClick={clearAll}>Clear</button>
-              </div>
-            </div>
-
-            {showBreakdown && (
-              <>
-                <hr className="sep" />
-
-                <div className="resultsGrid">
-                  <div className="metric">
-                    <div className="label">
-                      <span>AI likelihood</span>
-                      <span style={{ fontWeight: 700, color: (scorePct < 33 ? 'var(--ok)' : scorePct < 66 ? 'var(--warn)' : 'var(--bad)') }}>
-                        {confidence}
-                      </span>
-                    </div>
-
-                    <strong>{result?.ok ? `${scorePct}%` : '—'}</strong>
-
-                    <div className="bar" aria-label="score bar">
-                      <div style={{ width: `${result?.ok ? scorePct : 0}%` }} />
-                    </div>
-
-                    <div className="kv">
-                      <span className="k">Model: {result?.model || '—'}</span>
-                      <span className="k">Sentences: {result?.details?.sentenceCount ?? sentences.length}</span>
-                      <span className="k">Tokens: {result?.details?.tokenCount ?? words}</span>
-                    </div>
-
-                    {result?.notes?.length ? (
-                      <div className="note">
-                        {result.notes.slice(0, 3).map((n, i) => (
-                          <div key={i}>• {n}</div>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    {result?.error ? (
-                      <div className="note">Error: {result.error}</div>
-                    ) : null}
-                  </div>
-
-                  <div className="metric">
-                    <div className="label">
-                      <span>Sentence preview</span>
-                      <span style={{ fontWeight: 700, color: 'var(--muted)' }}>Preview only</span>
-                    </div>
-
-                    <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted)', lineHeight: 1.55 }}>
-                      Heatmap highlights are approximate. Best signal quality comes from longer samples (80+ words).
-                    </div>
-
-                    <div className="kv">
-                      <span className="k">Signals: repetition</span>
-                      <span className="k">Signals: burstiness</span>
-                      <span className="k">Signals: lexical diversity</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="preview">
-                  <div className="previewHeader">
-                    <strong>Sentence-level view</strong>
-                    <button onClick={runScan} disabled={loading || !text.trim()}>
-                      {loading ? 'Scanning…' : 'Re-scan'}
-                    </button>
-                  </div>
-
-                  {sentences.length === 0 ? (
-                    <div className="mini">Paste text and click Scan to see sentence-level preview.</div>
-                  ) : (
-                    sentences.map((s, idx) => (
-                      <div className="sentence" key={idx}>
-                        {highlightSentences ? <mark>{s}</mark> : s}
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                <div className="footerPad" />
-              </>
-            )}
           </div>
-        </div>
 
-        {/* RIGHT */}
-        <div className="rightPanel">
-          <div className="card">
-            <div className="cardInner">
-              <div className="panelTabs">
-                <button
-                  className={'tab ' + (activeTab === 'scan' ? 'active' : '')}
-                  onClick={() => setActiveTab('scan')}
-                >
-                  Scan types
-                </button>
-                <button
-                  className={'tab ' + (activeTab === 'history' ? 'active' : '')}
-                  onClick={() => setActiveTab('history')}
-                >
-                  History ({history.length})
-                </button>
+          {/* GRID: editor left, right panel like GPTZero */}
+          <div className="grid">
+            {/* LEFT: editor */}
+            <section className="card editorShell" aria-label="Text input">
+              <div className="editorHead">
+                <div>
+                  <h2>Paste text</h2>
+                  <div className="sub">Or drag-drop a file anywhere · Recommended: 40+ words</div>
+                </div>
+
+                <div className="chips" aria-label="Counters">
+                  <div className="chip">{counts.words} words</div>
+                  <div className="chip">{counts.chars} chars</div>
+                  <div className="chip">{endpointLabel}</div>
+                </div>
               </div>
 
-              <div style={{ marginTop: 12 }}>
-                {activeTab === 'scan' ? (
-                  <div className="scanList">
-                    <div className="scanItem">
-                      <div className="scanLeft">
-                        <div className="icon">AI</div>
-                        <div className="scanText">
-                          <strong>Advanced AI Scan</strong>
-                          <span>Multi-signal AI likelihood</span>
-                        </div>
-                      </div>
-                      <span className="badge on">On</span>
-                    </div>
+              <div className="textareaWrap">
+                <textarea
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="Paste text here…"
+                />
+              </div>
 
-                    <div className="scanItem">
-                      <div className="scanLeft">
-                        <div className="icon">⧉</div>
-                        <div className="scanText">
-                          <strong>Plagiarism Check</strong>
-                          <span>Coming soon</span>
-                        </div>
-                      </div>
-                      <span className="badge soon">Soon</span>
-                    </div>
+              <div className="editorFoot">
+                <div className="checkRow">
+                  <label>
+                    <input type="checkbox" checked={showBreakdown} onChange={(e) => setShowBreakdown(e.target.checked)} />
+                    Show breakdown
+                  </label>
+                  <label>
+                    <input type="checkbox" checked={highlightSentences} onChange={(e) => setHighlightSentences(e.target.checked)} />
+                    Highlight sentences
+                  </label>
+                </div>
 
-                    <div className="scanItem">
-                      <div className="scanLeft">
-                        <div className="icon">✓</div>
-                        <div className="scanText">
-                          <strong>AI Hallucinations</strong>
-                          <span>Coming soon</span>
-                        </div>
-                      </div>
-                      <span className="badge soon">Soon</span>
-                    </div>
+                <div className="checkRow">
+                  <label>
+                    <input type="checkbox" checked={autoTrim} onChange={(e) => setAutoTrim(e.target.checked)} />
+                    Auto-trim
+                  </label>
+                </div>
+              </div>
+            </section>
 
-                    <div className="scanItem">
-                      <div className="scanLeft">
-                        <div className="icon">✎</div>
-                        <div className="scanText">
-                          <strong>Writing Feedback</strong>
-                          <span>Coming soon</span>
-                        </div>
-                      </div>
-                      <span className="badge soon">Soon</span>
-                    </div>
-
-                    <div className="scanItem">
-                      <div className="scanLeft">
-                        <div className="icon">＋</div>
-                        <div className="scanText">
-                          <strong>Create Custom Scan</strong>
-                          <span>Coming soon</span>
-                        </div>
-                      </div>
-                      <span className="badge soon">Soon</span>
+            {/* RIGHT: scan types + results summary */}
+            <aside className="rightStack" aria-label="Scan options and results">
+              <section className="card">
+                <div className="cardInner">
+                  <div className="panelTitle">
+                    <div>
+                      <h3>Scan types</h3>
+                      <p>Choose a scan, then click Scan.</p>
                     </div>
                   </div>
-                ) : (
+
                   <div className="scanList">
-                    {history.length === 0 ? (
-                      <div className="mini">No scans yet. Run a scan and it’ll show up here.</div>
-                    ) : (
-                      history.map(h => (
-                        <button
-                          key={h.id}
-                          className="scanItem"
-                          style={{ cursor: 'pointer' }}
-                          onClick={() => pickHistory(h)}
-                          title="Click to load this scan"
-                        >
-                          <div className="scanLeft">
-                            <div className="icon">{Math.round(h.result.score * 100)}</div>
-                            <div className="scanText">
-                              <strong>{new Date(h.ts).toLocaleTimeString()}</strong>
-                              <span>{h.text.slice(0, 52)}{h.text.length > 52 ? '…' : ''}</span>
-                            </div>
+                    <div
+                      className="scanItem"
+                      onClick={() => setMode('advanced')}
+                      role="button"
+                      aria-label="Advanced AI Scan"
+                    >
+                      <div className="scanLeft">
+                        <div className="badge">AI</div>
+                        <div>
+                          <div style={{ fontWeight: 800, fontSize: 13 }}>Advanced AI Scan</div>
+                          <div className="small">Multi-signal AI likelihood</div>
+                        </div>
+                      </div>
+                      <div className={`badge ${mode === 'advanced' ? 'badgeOn' : 'badgeSoon'}`}>
+                        {mode === 'advanced' ? 'On' : 'On'}
+                      </div>
+                    </div>
+
+                    <div className="scanItem" role="button" aria-label="Plagiarism Check (coming soon)">
+                      <div className="scanLeft">
+                        <div className="badge">P</div>
+                        <div>
+                          <div style={{ fontWeight: 800, fontSize: 13 }}>Plagiarism Check</div>
+                          <div className="small">Coming soon</div>
+                        </div>
+                      </div>
+                      <div className="badge badgeSoon">Soon</div>
+                    </div>
+
+                    <div className="scanItem" role="button" aria-label="AI Hallucinations (coming soon)">
+                      <div className="scanLeft">
+                        <div className="badge">H</div>
+                        <div>
+                          <div style={{ fontWeight: 800, fontSize: 13 }}>AI Hallucinations</div>
+                          <div className="small">Coming soon</div>
+                        </div>
+                      </div>
+                      <div className="badge badgeSoon">Soon</div>
+                    </div>
+
+                    <div className="scanItem" role="button" aria-label="Writing Feedback (coming soon)">
+                      <div className="scanLeft">
+                        <div className="badge">W</div>
+                        <div>
+                          <div style={{ fontWeight: 800, fontSize: 13 }}>Writing Feedback</div>
+                          <div className="small">Coming soon</div>
+                        </div>
+                      </div>
+                      <div className="badge badgeSoon">Soon</div>
+                    </div>
+
+                    <div className="scanItem" role="button" aria-label="Create Custom Scan (coming soon)">
+                      <div className="scanLeft">
+                        <div className="badge">+</div>
+                        <div>
+                          <div style={{ fontWeight: 800, fontSize: 13 }}>Create Custom Scan</div>
+                          <div className="small">Coming soon</div>
+                        </div>
+                      </div>
+                      <div className="badge badgeSoon">Soon</div>
+                    </div>
+                  </div>
+
+                  <div className="hr" />
+
+                  <div className="small">
+                    Usability tip: if you’re testing content, compare multiple drafts, not just one paragraph.
+                  </div>
+                </div>
+              </section>
+
+              <section className="card">
+                <div className="cardInner">
+                  <div className="panelTitle">
+                    <div>
+                      <h3>Results</h3>
+                      <p>Probabilistic score — not a guarantee.</p>
+                    </div>
+                  </div>
+
+                  {error ? <div className="toast">{error}</div> : null}
+
+                  <div className="kpiRow" style={{ marginTop: 12 }}>
+                    <div className="kpi">
+                      <div className="kpiLabel">AI likelihood</div>
+                      <div className="kpiValue">{uiScore == null ? '—' : pct(uiScore)}</div>
+                      <div className="kpiHint">{uiScore == null ? 'Paste text and click Scan' : (confidence || '')}</div>
+                    </div>
+
+                    <div className="kpi">
+                      <div className="kpiLabel">Model</div>
+                      <div className="kpiValue" style={{ fontSize: 14, marginTop: 10 }}>
+                        {result?.model || 'local-heuristic'}
+                      </div>
+                      <div className="kpiHint">Edge-safe, no external APIs</div>
+                    </div>
+                  </div>
+
+                  {result?.details && showBreakdown ? (
+                    <>
+                      <div className="hr" />
+                      <div className="small" style={{ fontWeight: 800, marginBottom: 8 }}>Signals</div>
+                      <div className="kpiRow">
+                        <div className="kpi">
+                          <div className="kpiLabel">Entropy</div>
+                          <div className="kpiValue" style={{ fontSize: 18 }}>
+                            {result.details.entropy == null ? '—' : result.details.entropy.toFixed(2)}
                           </div>
-                          <span className="badge">{confidenceLabel(h.result.score)}</span>
-                        </button>
-                      ))
-                    )}
+                          <div className="kpiHint">Lexical diversity proxy</div>
+                        </div>
+                        <div className="kpi">
+                          <div className="kpiLabel">Burstiness</div>
+                          <div className="kpiValue" style={{ fontSize: 18 }}>
+                            {result.details.burstiness == null ? '—' : result.details.burstiness.toFixed(2)}
+                          </div>
+                          <div className="kpiHint">Sentence variation</div>
+                        </div>
+                      </div>
+                    </>
+                  ) : null}
+
+                  <div className="hr" />
+                  <div className="small">
+                    Tip: Best signal quality comes from longer samples (80+ words). Avoid super-short fragments.
                   </div>
-                )}
-              </div>
-            </div>
+                </div>
+              </section>
+            </aside>
           </div>
-
-          <div className="card">
-            <div className="cardInner mini">
-              <div style={{ fontWeight: 800, marginBottom: 6 }}>How scoring works</div>
-              Transparent signals, no external APIs required.
-              <ul>
-                <li><strong>Heuristics:</strong> repetition, burstiness, lexical diversity.</li>
-                <li><strong>Zip entropy:</strong> compressibility ratio (if your API returns it).</li>
-                <li><strong>DetectGPT-style:</strong> stability under perturbations (optional later).</li>
-              </ul>
-              Tooltips are built in: hover over metrics for explanation (you can add these next).
-            </div>
-          </div>
-
-          <button className="scanButton" onClick={runScan} disabled={loading || !text.trim()}>
-            {loading ? 'Scanning…' : 'Scan'}
-            <span aria-hidden="true">→</span>
-          </button>
         </div>
-      </div>
+      </main>
     </div>
   )
 }
