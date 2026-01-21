@@ -171,11 +171,16 @@ async function readFileAsText(file: File): Promise<string> {
   }
   if (ext === 'docx') {
     // dynamic import to keep bundle smaller
-    const mammoth = await import('mammoth')
-    const arrayBuffer = await file.arrayBuffer()
-    const result = await (mammoth as any).extractRawText({ arrayBuffer })
-    return (result.value ?? '').trim()
-  }
+try {
+  const { extractRawText } = await import('mammoth')
+  const arrayBuffer = await file.arrayBuffer()
+  const result = await extractRawText({ arrayBuffer })
+  return (result?.value ?? '').trim()
+} catch (err) {
+  console.error('DOCX parse failed:', err)
+  throw new Error('Unable to read .docx file')
+}
+
   throw new Error('Unsupported file type. Use .txt, .md, or .docx')
 }
 
