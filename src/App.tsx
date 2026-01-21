@@ -1,182 +1,475 @@
 import React, { useMemo, useState } from 'react'
 
-type ApiResult = {
-  ai_probability: number
-  confidence: 'low' | 'medium' | 'high'
-  signals: {
-    length: number
-    burstiness: number
-    repetition: number
-    punctuation_rate: number
-    avg_word_len: number
-    unique_word_ratio: number
+type DetectResponse = {
+  ai_probability?: number
+  confidence?: 'low' | 'medium' | 'high'
+  signals?: Record<string, any>
+  notes?: string[]
+  error?: string
+  label?: string
+  scores?: {
+    heuristic?: number
+    zippy?: number
+    detectgpt?: number
+    ensemble?: number
   }
-  notes: string[]
 }
 
-function confidenceFrom(p: number): ApiResult['confidence'] {
-  if (p >= 0.80) return 'high'
-  if (p >= 0.55) return 'medium'
-  return 'low'
+type ScanMode = 'advanced_ai' | 'plagiarism' | 'hallucinations' | 'writing_feedback' | 'custom'
+
+function pct(n?: number) {
+  if (typeof n !== 'number' || Number.isNaN(n)) return '—'
+  return `${Math.round(n * 100)}%`
+}
+
+function clamp01(n: number) {
+  return Math.max(0, Math.min(1, n))
+}
+
+function confidenceBadge(conf?: string) {
+  if (conf === 'high') return { label: 'High confidence', tone: 'bad' }
+  if (conf === 'medium') return { label: 'Medium confidence', tone: 'mid' }
+  if (conf === 'low') return { label: 'Low confidence', tone: 'good' }
+  return { label: '—', tone: 'neutral' }
+}
+
+function formatNumber(n?: number, digits = 3) {
+  if (typeof n !== 'number' || Number.isNaN(n)) return '—'
+  return n.toFixed(digits)
+}
+
+function sampleHuman() {
+  return `I planned to clean my desk this morning, but I ended up sorting old notes instead. It’s not dramatic—just a small reminder that attention drifts. I’m going to set a 20-minute timer, finish one task, and then decide what’s worth keeping.`
+}
+
+function sampleAIish() {
+  return `In today’s rapidly evolving digital landscape, it is essential to recognize that productivity is a multifaceted concept influenced by numerous variables. By implementing structured time-management strategies and maintaining consistent routines, individuals can optimize outcomes and achieve measurable improvements.`
 }
 
 export default function App() {
   const [text, setText] = useState('')
+  const [mode, setMode] = useState<ScanMode>('advanced_ai')
+  const [includeBreakdown, setIncludeBreakdown] = useState(true)
+  const [isCalibrating, setIsCalibrating] = useState(false)
+  const [calLabel, setCalLabel] = useState<'human' | 'ai'>('human')
+
   const [loading, setLoading] = useState(false)
-  const [res, setRes] = useState<ApiResult | null>(null)
+  const [res, setRes] = useState<DetectResponse | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
-  const charCount = text.length
-  const wordCount = useMemo(() => {
-    const w = text.trim().match(/\b[\p{L}\p{N}'-]+\b/gu)
-    return w ? w.length : 0
+  const words = useMemo(() => {
+    const m = text.trim().match(/\b[\p{L}\p{N}'-]+\b/gu)
+    return m ? m.length : 0
   }, [text])
+
+  const chars = text.length
+
+  const endpoint = '/api/detect'
+
+  const disabledModes: ScanMode[] = ['plagiarism', 'hallucinations', 'writing_feedback', 'custom']
+  const isDisabled = disabledModes.includes(mode)
 
   async function analyze() {
     setErr(null)
-    setLoading(true)
     setRes(null)
+
+    if (isDisabled) {
+      setErr('That scan type is coming soon. For now, use Advanced AI Scan.')
+      return
+    }
+
+    const t = text.trim()
+    if (!t) {
+      setErr('Paste some text first.')
+      return
+    }
+
+    setLoading(true)
     try {
-      const r = await fetch('/api/detect', {
+      const payload: any = { text: t }
+      if (isCalibrating) {
+        payload.mode = 'calibration'
+        payload.label = calLabel
+      }
+
+      const r = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify(payload),
       })
+
+      const data = (await r.json()) as DetectResponse
       if (!r.ok) {
-        const t = await r.text()
-        throw new Error(t || `HTTP ${r.status}`)
+        setErr(data?.error ?? 'Request failed.')
+        setRes(data)
+      } else {
+        setRes(data)
       }
-      const data = (await r.json()) as ApiResult
-      setRes(data)
     } catch (e: any) {
-      setErr(e?.message ?? 'Request failed')
+      setErr(e?.message ?? 'Network error.')
     } finally {
       setLoading(false)
     }
   }
 
-  function fillSample() {
-    setText(
-      `In recent years, large language models have become widely used for drafting content. This tool estimates the likelihood that a passage was produced by an automated system based on statistical signals such as repetition, word diversity, punctuation patterns, and sentence-length variance. It is not definitive proof—treat it as a probabilistic indicator and combine it with human review.`
-    )
-  }
+  const aiProb = typeof res?.ai_probability === 'number' ? clamp01(res!.ai_probability!) : undefined
+  const badge = confidenceBadge(res?.confidence)
 
-  const p = res?.ai_probability ?? 0
-  const pct = Math.round(p * 100)
-  const conf = res ? confidenceFrom(res.ai_probability) : null
+  // Pull known signals if present
+  const zippyScore = res?.signals?.zippy_score ?? res?.signals?.zippyScore
+  const detectgptStability = res?.signals?.detectgpt_stability ?? res?.signals?.detectgptStability
+  const compressionRatio = res?.signals?.compression_ratio
 
   return (
-    <div className="container">
-      <div className="card">
-        <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <div className="logo" aria-hidden="true">◎</div>
           <div>
-            <h1>AI Text Detector (Cloudflare Pages)</h1>
-            <small className="muted">
-              Open-source, edge-safe. Probabilistic score (not a guarantee).
-            </small>
-          </div>
-          <div className="row">
-            <button className="btn secondary" onClick={fillSample} disabled={loading}>
-              Sample
-            </button>
-            <button className="btn" onClick={analyze} disabled={loading || wordCount < 40}>
-              {loading ? 'Analyzing…' : 'Analyze'}
-            </button>
+            <div className="brandTitle">AI Text Detector</div>
+            <div className="brandSub">Edge-deployed on Cloudflare Pages • Multi-signal scoring</div>
           </div>
         </div>
 
-        <hr className="sep" />
-
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Paste text here (40+ words recommended)…"
-        />
-        <div className="row" style={{ marginTop: 10, justifyContent: 'space-between' }}>
-          <small className="muted">{wordCount} words · {charCount} chars</small>
-          <small className="muted">Endpoint: <span className="tag">POST /api/detect</span></small>
+        <div className="topActions">
+          <button
+            className="btn ghost"
+            onClick={() => setText(sampleHuman())}
+            type="button"
+          >
+            Load human sample
+          </button>
+          <button
+            className="btn ghost"
+            onClick={() => setText(sampleAIish())}
+            type="button"
+          >
+            Load AI sample
+          </button>
+          <button
+            className="btn primary"
+            onClick={analyze}
+            disabled={loading}
+            type="button"
+          >
+            {loading ? (
+              <>
+                <span className="spinner" aria-hidden="true" />
+                Scanning…
+              </>
+            ) : (
+              <>Scan</>
+            )}
+          </button>
         </div>
+      </header>
 
-        {err && (
-          <>
-            <hr className="sep" />
-            <div className="tag" style={{ borderColor: 'rgba(239,68,68,0.5)' }}>
-              Error: {err}
+      <main className="layout">
+        {/* LEFT: Editor + Results */}
+        <section className="mainCol">
+          <div className="card editorCard">
+            <div className="cardHeader">
+              <div>
+                <div className="cardTitle">Paste text</div>
+                <div className="cardHint">Recommended: 40+ words for better stability</div>
+              </div>
+              <div className="meta">
+                <span className="pill">{words} words</span>
+                <span className="pill">{chars} chars</span>
+              </div>
             </div>
-          </>
-        )}
 
-        {res && (
-          <>
-            <hr className="sep" />
-            <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
-              <div className="row" style={{ alignItems: 'center' }}>
-                <span className="tag">
-                  AI likelihood: <b style={{ marginLeft: 6 }}>{pct}%</b>
+            <div className="editorWrap">
+              <textarea
+                className="textarea"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Paste text here…"
+                spellCheck={false}
+              />
+            </div>
+
+            <div className="editorFooter">
+              <div className="leftFoot">
+                <span className="endpoint">
+                  Endpoint: <code>POST {endpoint}</code>
                 </span>
-                <span className="tag">
-                  Confidence: <b style={{ marginLeft: 6 }}>{conf}</b>
-                </span>
               </div>
-              <small className="muted">
-                Tip: mix signals + human judgment; avoid “gotcha” decisions.
-              </small>
-            </div>
 
-            <div className="bar" style={{ marginTop: 10 }}>
-              <div style={{ width: `${pct}%`, background: p >= 0.8 ? '#ef4444' : p >= 0.55 ? '#f59e0b' : '#22c55e' }} />
-            </div>
+              <div className="rightFoot">
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={includeBreakdown}
+                    onChange={(e) => setIncludeBreakdown(e.target.checked)}
+                  />
+                  <span>Show breakdown</span>
+                </label>
 
-            <hr className="sep" />
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={isCalibrating}
+                    onChange={(e) => setIsCalibrating(e.target.checked)}
+                  />
+                  <span>Calibration mode</span>
+                </label>
 
-            <h2>Signals</h2>
-            <div className="kpi">
-              <div>
-                <small className="muted">Burstiness</small><br />
-                <b>{res.signals.burstiness.toFixed(3)}</b>
-              </div>
-              <div>
-                <small className="muted">Repetition</small><br />
-                <b>{res.signals.repetition.toFixed(3)}</b>
-              </div>
-              <div>
-                <small className="muted">Unique word ratio</small><br />
-                <b>{res.signals.unique_word_ratio.toFixed(3)}</b>
-              </div>
-              <div>
-                <small className="muted">Punctuation rate</small><br />
-                <b>{res.signals.punctuation_rate.toFixed(3)}</b>
-              </div>
-              <div>
-                <small className="muted">Avg word length</small><br />
-                <b>{res.signals.avg_word_len.toFixed(2)}</b>
-              </div>
-              <div>
-                <small className="muted">Length</small><br />
-                <b>{res.signals.length}</b>
+                {isCalibrating && (
+                  <select
+                    className="select"
+                    value={calLabel}
+                    onChange={(e) => setCalLabel(e.target.value as any)}
+                    aria-label="Calibration label"
+                  >
+                    <option value="human">Label: human</option>
+                    <option value="ai">Label: ai</option>
+                  </select>
+                )}
               </div>
             </div>
+          </div>
 
-            <hr className="sep" />
+          {err && (
+            <div className="alert bad">
+              <div className="alertTitle">Heads up</div>
+              <div className="alertBody">{err}</div>
+            </div>
+          )}
 
-            <h2>Notes</h2>
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {res.notes.map((n, i) => (
-                <li key={i} style={{ marginBottom: 6 }}>
-                  <small className="muted">{n}</small>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </div>
+          {res && !isCalibrating && (
+            <div className="card resultsCard">
+              <div className="cardHeader">
+                <div>
+                  <div className="cardTitle">Results</div>
+                  <div className="cardHint">Probabilistic score — not a guarantee.</div>
+                </div>
+                <span className={`badge ${badge.tone}`}>{badge.label}</span>
+              </div>
 
-      <div style={{ marginTop: 14 }}>
-        <small className="muted">
-          This starter uses lightweight statistical signals to stay Edge-compatible.
-          If you want stronger detection, we can add a second-pass method (DetectGPT-style) later.
-        </small>
-      </div>
+              <div className="scoreRow">
+                <div className="scoreBig">
+                  <div className="scoreLabel">AI likelihood</div>
+                  <div className="scoreValue">{pct(aiProb)}</div>
+                </div>
+
+                <div className="scoreBarWrap" aria-label="AI likelihood bar">
+                  <div className="scoreBar">
+                    <div
+                      className="scoreFill"
+                      style={{ width: `${Math.round((aiProb ?? 0) * 100)}%` }}
+                    />
+                  </div>
+                  <div className="scoreTicks">
+                    <span>0</span><span>25</span><span>50</span><span>75</span><span>100</span>
+                  </div>
+                </div>
+              </div>
+
+              {includeBreakdown && (
+                <div className="grid3">
+                  <div className="metric">
+                    <div className="metricLabel">ZipPy entropy</div>
+                    <div className="metricValue">{pct(typeof zippyScore === 'number' ? zippyScore : undefined)}</div>
+                    <div className="metricHint">
+                      Compression ratio: <b>{formatNumber(compressionRatio, 3)}</b>
+                    </div>
+                  </div>
+
+                  <div className="metric">
+                    <div className="metricLabel">DetectGPT-style stability</div>
+                    <div className="metricValue">{pct(typeof detectgptStability === 'number' ? detectgptStability : undefined)}</div>
+                    <div className="metricHint">Stability under light perturbations</div>
+                  </div>
+
+                  <div className="metric">
+                    <div className="metricLabel">Text length</div>
+                    <div className="metricValue">{res?.signals?.length ?? words}</div>
+                    <div className="metricHint">More text → better signal</div>
+                  </div>
+                </div>
+              )}
+
+              {Array.isArray(res.notes) && res.notes.length > 0 && (
+                <div className="notes">
+                  <div className="notesTitle">Notes</div>
+                  <ul>
+                    {res.notes.slice(0, 6).map((n, i) => (
+                      <li key={i}>{n}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {res && isCalibrating && (
+            <div className="card resultsCard">
+              <div className="cardHeader">
+                <div>
+                  <div className="cardTitle">Calibration output</div>
+                  <div className="cardHint">Use this to collect labeled score distributions.</div>
+                </div>
+                <span className="badge neutral">Label: {res.label ?? calLabel}</span>
+              </div>
+
+              <div className="grid3">
+                <div className="metric">
+                  <div className="metricLabel">Heuristic</div>
+                  <div className="metricValue">{pct(res.scores?.heuristic)}</div>
+                  <div className="metricHint">Baseline structural signal</div>
+                </div>
+
+                <div className="metric">
+                  <div className="metricLabel">ZipPy</div>
+                  <div className="metricValue">{pct(res.scores?.zippy)}</div>
+                  <div className="metricHint">Compression entropy</div>
+                </div>
+
+                <div className="metric">
+                  <div className="metricLabel">DetectGPT</div>
+                  <div className="metricValue">{pct(res.scores?.detectgpt)}</div>
+                  <div className="metricHint">Perturbation stability</div>
+                </div>
+              </div>
+
+              <div className="calRow">
+                <div className="metric wide">
+                  <div className="metricLabel">Ensemble</div>
+                  <div className="metricValue">{pct(res.scores?.ensemble)}</div>
+                  <div className="metricHint">Save results (human vs ai) and tune thresholds.</div>
+                </div>
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(JSON.stringify(res, null, 2))
+                  }}
+                >
+                  Copy JSON
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* RIGHT: Sidebar */}
+        <aside className="sideCol">
+          <div className="card sideCard">
+            <div className="sideHeader">
+              <div className="sideTitle">Scan types</div>
+              <div className="sideSub">Choose a scan, then click Scan.</div>
+            </div>
+
+            <div className="scanList">
+              <button
+                className={`scanItem ${mode === 'advanced_ai' ? 'active' : ''}`}
+                onClick={() => setMode('advanced_ai')}
+                type="button"
+              >
+                <div className="scanIcon">◉</div>
+                <div className="scanText">
+                  <div className="scanName">Advanced AI Scan</div>
+                  <div className="scanDesc">Multi-signal AI likelihood</div>
+                </div>
+                <div className="scanTag ok">On</div>
+              </button>
+
+              <button
+                className={`scanItem ${mode === 'plagiarism' ? 'active' : ''}`}
+                onClick={() => setMode('plagiarism')}
+                type="button"
+              >
+                <div className="scanIcon">⧉</div>
+                <div className="scanText">
+                  <div className="scanName">Plagiarism Check</div>
+                  <div className="scanDesc">Coming soon</div>
+                </div>
+                <div className="scanTag off">Soon</div>
+              </button>
+
+              <button
+                className={`scanItem ${mode === 'hallucinations' ? 'active' : ''}`}
+                onClick={() => setMode('hallucinations')}
+                type="button"
+              >
+                <div className="scanIcon">✦</div>
+                <div className="scanText">
+                  <div className="scanName">AI Hallucinations</div>
+                  <div className="scanDesc">Coming soon</div>
+                </div>
+                <div className="scanTag off">Soon</div>
+              </button>
+
+              <button
+                className={`scanItem ${mode === 'writing_feedback' ? 'active' : ''}`}
+                onClick={() => setMode('writing_feedback')}
+                type="button"
+              >
+                <div className="scanIcon">✎</div>
+                <div className="scanText">
+                  <div className="scanName">Writing Feedback</div>
+                  <div className="scanDesc">Coming soon</div>
+                </div>
+                <div className="scanTag off">Soon</div>
+              </button>
+
+              <button
+                className={`scanItem ${mode === 'custom' ? 'active' : ''}`}
+                onClick={() => setMode('custom')}
+                type="button"
+              >
+                <div className="scanIcon">＋</div>
+                <div className="scanText">
+                  <div className="scanName">Create Custom Scan</div>
+                  <div className="scanDesc">Coming soon</div>
+                </div>
+                <div className="scanTag off">Soon</div>
+              </button>
+            </div>
+
+            <div className="sideFooter">
+              <div className="smallMuted">
+                Tip: For best results, test with multiple paragraphs. Short text can look “AI-ish” even when it isn’t.
+              </div>
+            </div>
+          </div>
+
+          <div className="card sideCard">
+            <div className="sideHeader">
+              <div className="sideTitle">How scoring works</div>
+              <div className="sideSub">Transparent signals, no external APIs.</div>
+            </div>
+
+            <div className="bullets">
+              <div className="bullet">
+                <div className="dot" />
+                <div><b>Heuristics:</b> repetition, burstiness, lexical diversity.</div>
+              </div>
+              <div className="bullet">
+                <div className="dot" />
+                <div><b>ZipPy entropy:</b> compressibility of text (gzip ratio).</div>
+              </div>
+              <div className="bullet">
+                <div className="dot" />
+                <div><b>DetectGPT-style:</b> stability under light perturbations.</div>
+              </div>
+            </div>
+
+            <div className="sideFooter">
+              <div className="smallMuted">
+                If you want the UI to match GPTZero even closer (fonts, spacing, micro-interactions), say “v2 polish” and I’ll tune it.
+              </div>
+            </div>
+          </div>
+        </aside>
+      </main>
+
+      <footer className="footer">
+        <div className="smallMuted">
+          Open-source • Edge-safe • Built for Cloudflare Pages Functions
+        </div>
+      </footer>
     </div>
   )
 }
