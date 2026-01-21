@@ -156,13 +156,55 @@ achieve better outcomes and maintain consistent progress toward their goals.`
         }),
       })
 
-      const data = (await res.json()) as ApiDetectResponse
-      if (!data.ok) {
-        setError(data.error || 'Scan failed.')
+      // If the function returns non-2xx, try to surface a useful message.
+      if (!res.ok) {
+        let msg = `Scan failed (HTTP ${res.status}).`
+        try {
+          const maybeJson = await res.json()
+          msg = (maybeJson?.error as string) || msg
+        } catch {
+          // non-JSON response, keep default msg
+        }
+        setError(msg)
         setResult(null)
-      } else {
-        setResult(data)
+        return
       }
+
+      // Accept BOTH shapes:
+      // 1) { ok: true, score, model, details }
+      // 2) { score, model, details }   (no ok)
+      const raw = (await res.json()) as any
+
+      const hasScore = typeof raw?.score === 'number'
+      const okField = typeof raw?.ok === 'boolean' ? raw.ok : undefined
+
+      if (okField === false) {
+        setError(raw?.error || 'Scan failed.')
+        setResult(null)
+        return
+      }
+
+      if (okField === true) {
+        setResult(raw as ApiDetectResponse)
+        return
+      }
+
+      if (hasScore) {
+        // normalize into ApiDetectResponse
+        const normalized: ApiDetectResponse = {
+          ok: true,
+          score: raw.score,
+          model: raw.model,
+          details: raw.details,
+          notes: raw.notes,
+        }
+        setResult(normalized)
+        return
+      }
+
+      // If we get here, backend returned JSON but not in an expected format.
+      setError(raw?.error || 'Scan failed (unexpected response).')
+      setResult(null)
     } catch (err: any) {
       setError(err?.message || 'Network error.')
     } finally {
