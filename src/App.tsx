@@ -31,7 +31,6 @@ function shortCountLabel(text: string) {
 }
 
 function iconSvg(kind: string) {
-  // simple inline icons (no deps)
   const common = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', xmlns: 'http://www.w3.org/2000/svg' }
   switch (kind) {
     case 'home':
@@ -79,6 +78,44 @@ function iconSvg(kind: string) {
     default:
       return null
   }
+}
+
+/** Pull a numeric score from lots of common API shapes. Returns 0..1 if found. */
+function extractScore(raw: any): number | null {
+  const candidates: any[] = [
+    raw?.score,
+    raw?.ai_likelihood,
+    raw?.aiLikelihood,
+    raw?.likelihood,
+    raw?.probability,
+    raw?.ai_probability,
+    raw?.aiProbability,
+    raw?.result?.score,
+    raw?.result?.ai_likelihood,
+    raw?.result?.likelihood,
+    raw?.data?.score,
+    raw?.data?.likelihood,
+    raw?.data?.ai_likelihood,
+  ]
+
+  let n: number | null = null
+
+  for (const c of candidates) {
+    if (typeof c === 'number' && Number.isFinite(c)) { n = c; break }
+    if (typeof c === 'string') {
+      const parsed = Number(c)
+      if (Number.isFinite(parsed)) { n = parsed; break }
+    }
+  }
+
+  if (n == null) return null
+
+  // normalize 0..100 → 0..1 if needed
+  if (n > 1 && n <= 100) n = n / 100
+
+  // clamp sanity
+  if (n < 0 || n > 1) return null
+  return n
 }
 
 export default function App() {
@@ -156,55 +193,47 @@ achieve better outcomes and maintain consistent progress toward their goals.`
         }),
       })
 
-      // If the function returns non-2xx, try to surface a useful message.
       if (!res.ok) {
         let msg = `Scan failed (HTTP ${res.status}).`
         try {
           const maybeJson = await res.json()
           msg = (maybeJson?.error as string) || msg
         } catch {
-          // non-JSON response, keep default msg
+          // non-JSON response
         }
         setError(msg)
         setResult(null)
         return
       }
 
-      // Accept BOTH shapes:
-      // 1) { ok: true, score, model, details }
-      // 2) { score, model, details }   (no ok)
       const raw = (await res.json()) as any
 
-      const hasScore = typeof raw?.score === 'number'
-      const okField = typeof raw?.ok === 'boolean' ? raw.ok : undefined
-
-      if (okField === false) {
+      // If backend explicitly says ok:false, respect it.
+      if (typeof raw?.ok === 'boolean' && raw.ok === false) {
         setError(raw?.error || 'Scan failed.')
         setResult(null)
         return
       }
 
-      if (okField === true) {
-        setResult(raw as ApiDetectResponse)
+      // Try to extract score from many possible shapes.
+      const score = extractScore(raw)
+
+      if (score == null) {
+        const keys = raw && typeof raw === 'object' ? Object.keys(raw).slice(0, 12).join(', ') : String(raw)
+        setError(`Scan failed (unexpected response). Missing score. Keys: ${keys}`)
+        setResult(null)
         return
       }
 
-      if (hasScore) {
-        // normalize into ApiDetectResponse
-        const normalized: ApiDetectResponse = {
-          ok: true,
-          score: raw.score,
-          model: raw.model,
-          details: raw.details,
-          notes: raw.notes,
-        }
-        setResult(normalized)
-        return
+      const normalized: ApiDetectResponse = {
+        ok: true,
+        score,
+        model: raw?.model || raw?.detector || raw?.result?.model || raw?.data?.model || 'local-heuristic',
+        details: raw?.details || raw?.result?.details || raw?.data?.details,
+        notes: raw?.notes || raw?.result?.notes || raw?.data?.notes,
       }
 
-      // If we get here, backend returned JSON but not in an expected format.
-      setError(raw?.error || 'Scan failed (unexpected response).')
-      setResult(null)
+      setResult(normalized)
     } catch (err: any) {
       setError(err?.message || 'Network error.')
     } finally {
@@ -221,7 +250,6 @@ achieve better outcomes and maintain consistent progress toward their goals.`
 
   return (
     <div className="appShell">
-      {/* LEFT SIDEBAR (GPTZero-like) */}
       <aside className="sidebar" aria-label="UpCube Detect navigation">
         <div className="brandDot" title="UpCube Detect">U</div>
 
@@ -275,10 +303,8 @@ achieve better outcomes and maintain consistent progress toward their goals.`
         </div>
       </aside>
 
-      {/* MAIN */}
       <main className="main">
         <div className="wrap">
-          {/* TOP BAR (like GPTZero doc header row) */}
           <div className="topBar">
             <div className="docTitle">
               <div>
@@ -307,9 +333,7 @@ achieve better outcomes and maintain consistent progress toward their goals.`
             </div>
           </div>
 
-          {/* GRID: editor left, right panel like GPTZero */}
           <div className="grid">
-            {/* LEFT: editor */}
             <section className="card editorShell" aria-label="Text input">
               <div className="editorHead">
                 <div>
@@ -353,7 +377,6 @@ achieve better outcomes and maintain consistent progress toward their goals.`
               </div>
             </section>
 
-            {/* RIGHT: scan types + results summary */}
             <aside className="rightStack" aria-label="Scan options and results">
               <section className="card">
                 <div className="cardInner">
@@ -365,12 +388,7 @@ achieve better outcomes and maintain consistent progress toward their goals.`
                   </div>
 
                   <div className="scanList">
-                    <div
-                      className="scanItem"
-                      onClick={() => setMode('advanced')}
-                      role="button"
-                      aria-label="Advanced AI Scan"
-                    >
+                    <div className="scanItem" onClick={() => setMode('advanced')} role="button" aria-label="Advanced AI Scan">
                       <div className="scanLeft">
                         <div className="badge">AI</div>
                         <div>
@@ -378,9 +396,7 @@ achieve better outcomes and maintain consistent progress toward their goals.`
                           <div className="small">Multi-signal AI likelihood</div>
                         </div>
                       </div>
-                      <div className={`badge ${mode === 'advanced' ? 'badgeOn' : 'badgeSoon'}`}>
-                        {mode === 'advanced' ? 'On' : 'On'}
-                      </div>
+                      <div className={`badge ${mode === 'advanced' ? 'badgeOn' : 'badgeSoon'}`}>On</div>
                     </div>
 
                     <div className="scanItem" role="button" aria-label="Plagiarism Check (coming soon)">
